@@ -1614,3 +1614,48 @@ escalated, not resolved here.
   edited here; the conflict is recorded and escalated, the same way D11/D20 handle the `EXPECTED.md` conflicts.
 
 No other disagreements. Sections 2, 3 and 5 are otherwise consistent with `tests/EXPECTED.md` item by item, as listed above.
+
+## For the README and for step 08 section 4
+
+### What F1 actually catches (and what neither metric catches)
+
+Claim this precisely in the README. F1 is token-overlap after SQuAD normalization, and SQuAD
+normalization does **not** stem. So F1 only rewards an answer that shares EXACT tokens with the
+gold; a morphological variant scores 0 on both metrics.
+
+| prediction (question 5388, gold `torpedoes`) | EM | F1 | what it shows |
+|---|---|---|---|
+| `torpedoes and submarines` | 0 | **0.5** | over-complete answer — F1 catches it, EM does not |
+| `torpedo boats and submarines` | 0 | **0.0** | **neither metric catches it**: `torpedo` != `torpedoes` |
+
+The second row is the more interesting limitation and belongs in the write-up. Our live step-05
+run produced exactly it: the model answered `torpedo boats and submarines`, which a human would
+call substantively close, and both metrics scored it zero. So our EM figures are a LOWER bound on
+"answers a human would accept", and the gap is not measurable with either number we report. Do NOT
+write "F1 catches substantively correct answers" — it catches over-complete and under-complete
+answers built from the gold's own tokens, and nothing else.
+
+### Step 08 section 4 — the CoT-SC prompt-assertion gap (caught before any spend)
+
+An entry for "anything in our pipeline the paper does not describe that could move results".
+
+**The gap.** `cot_sc` was tested for temperature (0.7), sample count (21) and distinct
+`sample_index` values, but NOTHING asserted the prompt text it actually sent. Two one-token
+mutations survived the full 154-test suite: the lead token becoming `Answer:` instead of
+`Thought:`, and the exemplar key falling back to `webqa_simple6`/`webqa_simple3`.
+
+**The corruption path.** Either mutation turns CoT-SC into *Standard sampled at temperature 0.7* —
+21 samples drawn with no chain of thought. It still returns 21 parseable answers, still produces
+plausible `winner_votes`, and `runs/hotpotqa_cotsc_*.jsonl` plus the `cotsc` row of results.csv
+keep their labels. Nothing errors and nothing looks wrong.
+
+**The blast radius is three of the seven Table 1 rows, not one.** CoT-SC directly; and because
+`cotsc_to_react` branches on `winner_votes`, which those corrupted samples produce, BOTH
+combination rows inherit it. The paper's central CoT-SC > CoT > Standard ordering would become
+unfalsifiable — we would be comparing Standard against Standard-at-0.7 and reporting it as CoT-SC.
+
+**Status.** Found by mutation before any CoT-SC call was ever paid for. Now pinned by
+`test_cot_sc_is_built_on_the_cot_prompt_not_standard`, which asserts the sent prompt is
+byte-equal to `build_prompt(q, task, "cot")`, ends `\nThought:` and differs from the Standard
+prompt, on both tasks.
+
