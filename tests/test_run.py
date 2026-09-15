@@ -321,3 +321,248 @@ def test_runner_output_feeds_the_combination_rules_unchanged(harness, tmp_path):
     assert [l["source"] for l in b] == ["react", "react"]
     assert [l["n_steps"] for l in b] == [7, 7]  # inherited from ReAct (D15)
     assert [l["cost"] for l in a + b] == [0.0] * 4
+
+
+# -- resumability (rule 6; a 500-question run is long) ----------------------
+#
+# Rule 12 — the wrong implementations these three tests separate:
+#   * a resume that re-runs questions already on disk  -> 15 JSONL rows, 15 ledger rows
+#   * a resume that appends duplicate lines            -> 10 idx values but 15 rows
+#   * a resume that appends a SECOND summary row       -> 2 rows, total_cost 0.0042
+#   * a rewrite instead of an append                   -> the first 5 lines change
+#   * a budget pre-flight sized on --n, not the gap    -> budget[0] == 10, not 5
+
+def ledgered(monkeypatch):
+    """Make the fake client append a real results/calls.csv row per request (1,000 +
+    100 tokens = $0.00021 on gpt-4o-mini), so these tests can watch rule 8's ledger the
+    way rule 8 does. Without it every cost here is 0.0 and a double-count is invisible."""
+    inner = llm.complete
+
+    def logged(*a, **k):
+        out = inner(*a, **k)
+        llm._log_call({"prompt_tokens": 1000, "completion_tokens": 100}, 0)
+        return out
+
+    monkeypatch.setattr(llm, "complete", logged)
+
+
+def ledger_rows(tmp_path):
+    """The calls.csv rows THIS run wrote. The header and the harness's seeded row (one
+    earlier run's $0.0033, there so a cumulative-vs-delta cost bug cannot hide) are the
+    first two lines and belong to neither invocation under test."""
+    return (tmp_path / "calls.csv").read_text().splitlines()[2:]
+
+
+def killing_after(k):
+    """A fake that answers, then dies on its k-th request — a run killed mid-flight."""
+    box = {"i": 0}
+
+    def texts(prompt, n):
+        box["i"] += 1
+        if box["i"] == k:
+            raise RuntimeError("process killed mid-run")
+        return ["Arthur's Magazine"] * n
+    return texts
+
+
+def test_a_killed_run_resumes_from_the_jsonl_without_double_counting(harness, tmp_path,
+                                                                    monkeypatch):
+    fake = harness(killing_after(6))
+    ledgered(monkeypatch)
+    with pytest.raises(RuntimeError):
+        run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "10"])
+
+    # The five questions that finished are on disk — the whole point of appending per
+    # question rather than collecting the run and writing at the end.
+    first_five = (tmp_path / "runs" / "hotpotqa_standard_gpt-4o-mini.jsonl").read_text()
+    assert len(first_five.splitlines()) == 5
+    assert len(ledger_rows(tmp_path)) == 5          # 6th request raised before billing
+    assert not (tmp_path / "results.csv").exists()  # a killed run summarises nothing
+
+    fake = harness(killing_after(None))
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "10"])
+
+    lines = lines_of(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl")
+    assert len(lines) == 10
+    assert len({l["idx"] for l in lines}) == 10  # no duplicate question, in any order
+    assert [l["idx"] for l in lines[:5]] == [3687, 6238, 5388, 3522, 3824]
+    # Appended, not rewritten: the five surviving lines are byte-identical.
+    first_five_now = "\n".join(
+        (tmp_path / "runs" / "hotpotqa_standard_gpt-4o-mini.jsonl")
+        .read_text().splitlines()[:5]) + "\n"
+    assert first_five_now == first_five
+
+    # The resume issued 5 requests, not 10: the ledger grew by 5 rows and the budget
+    # pre-flight was sized on the GAP, so a resumed run cannot be refused for spend it
+    # is not about to make.
+    assert len(fake.calls) == 5
+    assert fake.budget[0] == 5
+    assert len(ledger_rows(tmp_path)) == 10
+    assert llm._spend_so_far() == pytest.approx(0.0033 + 10 * 0.00021)
+    assert sum(l["cost"] for l in lines) == pytest.approx(10 * 0.00021)
+
+    rows = list(csv.DictReader((tmp_path / "results.csv").open()))
+    assert len(rows) == 1  # one row for the condition, not one per invocation
+    assert rows[0]["n"] == "10"
+    assert float(rows[0]["total_cost"]) == pytest.approx(10 * 0.00021)
+
+
+def test_re_running_a_finished_run_costs_nothing_and_leaves_one_summary_row(
+        harness, tmp_path, monkeypatch):
+    harness(killing_after(None))
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "10"])
+    jsonl = (tmp_path / "runs" / "hotpotqa_standard_gpt-4o-mini.jsonl").read_text()
+    ledger = ledger_rows(tmp_path)
+
+    fake = harness(killing_after(None))
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "10"])
+
+    assert fake.calls == []  # every question was already answered
+    assert (tmp_path / "runs" / "hotpotqa_standard_gpt-4o-mini.jsonl").read_text() == jsonl
+    assert ledger_rows(tmp_path) == ledger  # rule 8's ledger did not double-count
+    rows = list(csv.DictReader((tmp_path / "results.csv").open()))
+    assert [r["condition"] for r in rows] == ["standard"]
+    assert float(rows[0]["total_cost"]) == pytest.approx(10 * 0.00021)  # not 0.0042
+
+
+def test_a_smaller_n_on_a_resume_deletes_nothing_and_does_not_shrink_the_summary(
+        harness, tmp_path, monkeypatch):
+    """The documented answer to "--n differs from the original" (src/run.py docstring):
+    --n selects a prefix, a resume only ever ADDS, and the summary row describes the
+    whole file — so its n is the file's line count and never contradicts the file."""
+    harness(killing_after(None))
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "3"])
+    assert list(csv.DictReader((tmp_path / "results.csv").open()))[0]["n"] == "3"
+
+    fake = harness(killing_after(None))  # grow: 3 done, 5 asked for -> 2 new
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "5"])
+    assert len(fake.calls) == 2
+    rows = list(csv.DictReader((tmp_path / "results.csv").open()))
+    assert [r["n"] for r in rows] == ["5"]
+
+    fake = harness(killing_after(None))  # shrink: nothing run, nothing deleted
+    ledgered(monkeypatch)
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "2"])
+    assert fake.calls == []
+    assert len(lines_of(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl")) == 5
+    rows = list(csv.DictReader((tmp_path / "results.csv").open()))
+    assert [r["n"] for r in rows] == ["5"]  # not 2, and still exactly one row
+
+
+# -- resuming a run that is NOT a clean prefix ------------------------------
+#
+# Rule 12 — the wrong implementations the four tests below separate, none of which any
+# test above can see because every fixture there is a prefix of the evaluation order,
+# is HotpotQA (whose questions are all distinct) and is `--condition standard` (the
+# branch with no env at all):
+#   * a resume that skips POSITIONALLY (items[len(done):])  -> 10 rows, 7 distinct idx
+#   * a resume that matches on question TEXT, not idx       -> FEVER tops out at 237
+#   * rule 8's >100 gate read off the REMAINING work        -> 101 runs unauthorised
+#   * an env lifecycle that counts items instead of todo    -> resets 5, not 2
+
+def seed_jsonl(tmp_path, name, condition, items):
+    """Write finished-looking lines for `items` — a JSONL left by an earlier run. Only
+    `idx` (the resume) and `em`/`n_steps`/`hit_step_limit`/`cost` (the summary row) are
+    read back, but the whole schema is written so nothing here can pass by omission."""
+    path = tmp_path / "runs" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps({
+        "idx": i, "question": q, "gold": g, "prediction": g, "em": 1, "f1": 1.0,
+        "n_steps": 0, "n_calls": 1, "n_badcalls": 0, "hit_step_limit": False,
+        "empty_samples": None, "winner_votes": None, "cost": 0.0,
+        "condition": condition, "trajectory": f"Question: {q}\n",
+    }) + "\n" for i, q, g in items))
+    return path
+
+
+def test_a_resume_fills_the_gaps_by_idx_never_by_position(harness, tmp_path):
+    """The file on disk is NOT a prefix of the evaluation order — two shards merged, or
+    three lines lost from the middle of a killed run. `items[len(done):]` issues the
+    same FOUR requests and leaves the same TEN rows, so a row count cannot see it: it
+    re-runs (and re-bills) idx 2544/1557/5762 and never asks 3522/3824/2866, leaving
+    results.csv reporting n=10 over 7 questions, three of them counted twice."""
+    items = run.load("hotpotqa", "dev")[:10]
+    assert [i for i, _, _ in items] == [3687, 6238, 5388, 3522, 3824,
+                                        2866, 1551, 2544, 1557, 5762]
+    seed_jsonl(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl", "standard",
+               [items[i] for i in (0, 1, 2, 7, 8, 9)])
+
+    fake = harness(["Arthur's Magazine"])
+    run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "10"])
+
+    lines = lines_of(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl")
+    assert len(fake.calls) == 4
+    assert fake.budget[0] == 4                       # the gap, not the 6 already done
+    assert [l["idx"] for l in lines[6:]] == [3522, 3824, 2866, 1551]  # exactly the gap
+    assert len(lines) == 10 and len({l["idx"] for l in lines}) == 10
+    assert sorted(l["idx"] for l in lines) == sorted(i for i, _, _ in items)
+
+
+def test_a_fever_resume_skips_by_idx_not_by_the_claim_text(harness, tmp_path):
+    """Invisible on HotpotQA — all 7,405 dev questions are distinct — so every test
+    above passes against a resume keyed on question text. FEVER's 500-item sample
+    contains the same claim twice under two different idx, and a text-keyed resume then
+    tops out at 237 lines for --n 238: results.csv reports the wrong n, and any paired
+    comparison against a condition that was NOT resumed dies in stats._em_by_idx."""
+    items = run.load("fever", "dev")[:238]
+    seeded, dup = items[114], items[237]
+    assert seeded[1] == dup[1] == "AMGTV has programming."  # same claim...
+    assert (seeded[0], dup[0]) == (5274, 5199)              # ...two different idx
+    seed_jsonl(tmp_path, "fever_standard_gpt-4o-mini.jsonl", "standard", [seeded])
+
+    fake = harness(["SUPPORTS"])
+    run.main(["--task", "fever", "--condition", "standard", "--n", "238",
+              "--yes-over-100"])
+
+    lines = lines_of(tmp_path, "fever_standard_gpt-4o-mini.jsonl")
+    assert len(fake.calls) == 237          # everything except the one already on disk
+    assert [l["idx"] for l in lines] == [5274] + [i for i, _, _ in items if i != 5274]
+    assert {5274, 5199} <= {l["idx"] for l in lines}
+    assert len(lines) == 238
+
+
+def test_rule_8s_gate_reads_the_whole_run_not_what_is_left_of_it(harness, tmp_path):
+    """CLAUDE.md rule 8 authorises a RUN, not a chunk. Reading the gate off `todo`
+    defeats it by salami-slicing: --n 500 is refused on an empty file, then --n 150,
+    --n 300, --n 500 each present fewer than 100 remaining and complete the same
+    unauthorised 500-question run."""
+    items = run.load("hotpotqa", "dev")[:100]
+    seed_jsonl(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl", "standard", items)
+
+    fake = harness(["Arthur's Magazine"])
+    with pytest.raises(SystemExit, match="rule 8"):
+        run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "101"])
+
+    assert fake.events == []  # no call, and the budget pre-flight was never reached
+    assert len(lines_of(tmp_path, "hotpotqa_standard_gpt-4o-mini.jsonl")) == 100
+    assert not (tmp_path / "results.csv").exists()
+
+
+def test_a_resumed_react_run_resets_the_env_once_per_REMAINING_question(
+        harness, tmp_path, monkeypatch):
+    """The three resume tests above are all --condition standard, the branch that never
+    builds a WikiEnv or a graph — so D21's lifecycle across a resume boundary is
+    otherwise unexercised, and the 500-question runs that feed the claims table are
+    ReAct and Act."""
+    envs = []
+    monkeypatch.setattr(run.wiki_env, "WikiEnv", lambda: envs.append(FakeEnv()) or envs[-1])
+    harness([FINISH])
+    run.main(["--task", "hotpotqa", "--condition", "react", "--n", "3"])
+    assert envs[-1].resets == 3
+
+    fake = harness([FINISH])
+    lines = run.main(["--task", "hotpotqa", "--condition", "react", "--n", "5"])
+
+    assert len(envs) == 2        # D21: one env per invocation, never one per question
+    assert envs[-1].resets == 2  # the two REMAINING questions, not all five
+    assert len(fake.calls) == 2
+    assert [l["idx"] for l in lines] == [3687, 6238, 5388, 3522, 3824]
+    assert [l["n_steps"] for l in lines] == [1] * 5          # D15, across the boundary
+    assert [l["hit_step_limit"] for l in lines] == [False] * 5
+    row = list(csv.DictReader((tmp_path / "results.csv").open()))[0]
+    assert (row["n"], row["mean_steps"], row["pct_hit_step_limit"]) == ("5", "1.0", "0.0")

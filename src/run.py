@@ -20,6 +20,19 @@ Load-bearing details:
   step i leaves `step == i + 1`, and a step-limit episode leaves `step == 8` (D24).
 * **F1 is logged for every condition** (D41): EM alone cannot tell a wrong answer from
   a right answer that EM rejected (`torpedo boats and submarines` vs `torpedoes`).
+* **Resumable.** A 500-question run is long, so each question's line is appended to the
+  JSONL the moment it finishes, and a later invocation skips every `idx` already in that
+  file. The cache makes the LLM side of a resume free; the ledger stays honest because a
+  skipped question issues no call at all, so `results/calls.csv` grows by zero rows —
+  cheaper *and* stricter than re-running through the cache. The budget pre-flight sizes
+  the REMAINING questions, so a resume is not refused for spend it will not make.
+
+  **A different `--n` on a resume.** `--n` selects a prefix of the evaluation order, and
+  a resume only ever ADDS: `--n 500` after `--n 100` runs the 400 missing questions,
+  while `--n 50` after `--n 100` runs nothing and deletes nothing. The summary row always
+  describes the whole JSONL file, so its `n` is the file's line count (100 in that second
+  case, not 50) and never disagrees with the file it summarises; the smaller `--n` is
+  printed as a notice, not silently honoured. Shrinking a run means deleting its JSONL.
 """
 
 import argparse
@@ -27,7 +40,7 @@ import json
 from pathlib import Path
 
 from src import baselines, data, graph_react, llm, wiki_env
-from src.combine import write_jsonl, write_results_row
+from src.combine import read_jsonl, write_results_row
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "runs"
@@ -94,6 +107,14 @@ def run_one(idx, question, gold, task, condition, graph=None, env=None):
     }
 
 
+def append_jsonl(path, line):
+    """One question, flushed. Collecting the whole run and writing at the end loses
+    everything to a kill, which is the case resumability exists for."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--task", choices=("hotpotqa", "fever"), required=True)
@@ -110,22 +131,33 @@ def main(argv=None):
             f"{len(items)} questions > 100: CLAUDE.md rule 8 wants an explicit ask. "
             f"Re-run with --yes-over-100 once it is authorised."
         )
+    path = RUNS_DIR / f"{args.task}_{args.condition}_{llm.MODEL}.jsonl"
+    done = {l["idx"] for l in read_jsonl(path)} if path.exists() else set()
+    todo = [item for item in items if item[0] not in done]
+    if done:
+        print(f"{path}: {len(done)} questions already done, {len(todo)} to go")
+    if len(done) > len(items):
+        print(f"note: --n {args.n} is smaller than the {len(done)} questions already on "
+              f"disk; nothing is deleted and the summary row covers all {len(done)}")
+
     prompt_chars = (
         len(baselines.build_prompt(items[0][1], args.task, args.condition))
         if args.condition in NO_TOOL else LOOP_PROMPT_CHARS
     )
+    # Sized on what is left to do: the skipped questions were billed by the run that
+    # wrote them, and they are already on the calls.csv ledger `_spend_so_far()` reads.
     if not llm.check_budget_for_batch(
-        len(items), CALLS_PER_Q[args.condition], prompt_chars
+        len(todo), CALLS_PER_Q[args.condition], prompt_chars
     ):
         raise SystemExit("budget: refused before the first call (CLAUDE.md rule 8)")
 
     env = wiki_env.WikiEnv() if args.condition not in NO_TOOL else None
     graph = graph_react.build_graph(args.condition, env) if env else None
-    lines = [run_one(i, q, g, args.task, args.condition, graph, env)
-             for i, q, g in items]
+    for i, q, g in todo:
+        append_jsonl(path, run_one(i, q, g, args.task, args.condition, graph, env))
 
-    path = RUNS_DIR / f"{args.task}_{args.condition}_{llm.MODEL}.jsonl"
-    write_jsonl(path, lines)
+    # Re-read rather than reuse: the file, not this process, is what the row summarises.
+    lines = read_jsonl(path)
     row = write_results_row(args.task, args.condition, llm.MODEL, lines)
     print(f"{path}: {len(lines)} questions")
     print(dict(zip(["task", "condition", "model", "n", "metric", "mean_steps",

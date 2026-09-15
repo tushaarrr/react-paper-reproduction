@@ -91,6 +91,13 @@ def write_results_row(task, condition, model, lines, path=None):
     `metric` is mean EM (mean FEVER accuracy on FEVER, which `run.py` stores in the
     same `em` field). D15: `mean_steps` / `pct_hit_step_limit` are the empty string,
     not 0, for the three conditions that have no loop — 0 would read as a measurement.
+
+    REPLACES any existing row for the same (task, condition, model) rather than
+    appending a second one. That triple is exactly the name of one `runs/` JSONL file,
+    and this row is that file's summary — so a resumed or re-run condition must leave
+    one row, not a stale n=100 row beside a fresh n=500 row. Two rows would also
+    double-count `total_cost`, which is rule 8's per-condition check. Rows for other
+    conditions are untouched, and the header is written exactly once.
     """
     path = Path(RESULTS_CSV if path is None else path)  # module attr, so tests redirect
     n = len(lines)
@@ -104,10 +111,13 @@ def write_results_row(task, condition, model, lines, path=None):
         round(sum(l["cost"] for l in lines), 6),
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists() or path.stat().st_size == 0
-    with open(path, "a", newline="") as f:
+    kept = []
+    if path.exists() and path.stat().st_size:
+        with open(path, newline="") as f:
+            kept = [r for r in csv.reader(f)
+                    if r != RESULTS_HEADER and r[:3] != [task, condition, model]]
+    with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        if write_header:
-            writer.writerow(RESULTS_HEADER)
-        writer.writerow(row)
+        writer.writerow(RESULTS_HEADER)
+        writer.writerows(kept + [row])
     return row
