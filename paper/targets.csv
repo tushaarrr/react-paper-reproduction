@@ -1,0 +1,10 @@
+condition,hotpotqa_em,fever_acc,source
+Standard,28.7,57.1,Table 1 PaLM-540B
+CoT,29.4,56.3,Table 1 PaLM-540B
+CoT-SC,33.4,60.4,Table 1 PaLM-540B
+Act,25.7,58.9,Table 1 PaLM-540B
+ReAct,27.4,60.9,Table 1 PaLM-540B
+CoT-SC->ReAct,34.2,64.6,Table 1 PaLM-540B
+ReAct->CoT-SC,35.1,62.0,Table 1 PaLM-540B
+Supervised SoTA,67.5,89.5,Table 1 context only
+GPT-3 ReAct,30.8,,Appendix A.1 text-davinci-002

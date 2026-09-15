@@ -1,0 +1,11 @@
+data/
+runs/
+reference/
+.env
+.venv/
+__pycache__/
+*.pyc
+.cache/
+finetune/adapters/
+results/plots/
+
