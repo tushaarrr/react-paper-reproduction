@@ -89,11 +89,12 @@ def harness(monkeypatch, tmp_path):
     # The spend ledger starts NON-EMPTY (rule 12): with an empty one, a per-question
     # `cost` that logged the cumulative spend instead of this question's delta would
     # still read 0.0 on every line and be indistinguishable from the correct value.
-    # $0.0031 of someone else's prior run is on it, and every line below must read 0.0.
+    # One earlier run's row is on it — 20,000 + 500 tokens, $0.0033 at the section-5
+    # rates — and every line written below must still cost 0.0.
     ledger = tmp_path / "calls.csv"
     ledger.write_text(
         ",".join(llm.CALLS_HEADER) + "\n"
-        "2026-09-15T00:00:00,gpt-4o-mini,0,20000,500,0.0031,False\n"
+        "2026-09-15T00:00:00,gpt-4o-mini,0,20000,500,0.0033,False\n"
     )
     monkeypatch.setattr(llm, "CALLS_CSV", ledger)
     monkeypatch.setattr(llm, "MODEL", "gpt-4o-mini")
@@ -182,10 +183,10 @@ def test_every_line_carries_the_whole_schema_including_f1(harness, tmp_path):
         assert line["n_steps"] == 0 and line["hit_step_limit"] is False  # D15
         assert line["winner_votes"] is None and line["empty_samples"] is None
         assert line["trajectory"].startswith("Question: ")  # D25
-        # This question's own spend, not the ledger total: the harness seeded $0.0031 of
+        # This question's own spend, not the ledger total: the harness seeded $0.0033 of
         # prior spend, and no call here is billed, so the delta is 0.0 (rule 12).
         assert line["cost"] == 0.0
-    assert llm._spend_so_far() == 0.0031
+    assert llm._spend_so_far() == 0.0033
 
 
 def test_f1_is_logged_because_em_rejects_answers_that_are_not_wrong(harness):
