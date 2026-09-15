@@ -83,3 +83,17 @@ If you find another defect in a file this repo treats as authoritative — `CLAU
 append a line to this log, and tell me. Never fix it silently. Never leave a file that
 CLAUDE.md calls authoritative knowingly wrong, and never work around such a defect in
 `src/` while leaving the source of truth uncorrected.
+
+### Rule 11 — tests assert the outbound request, not just the return value
+
+A fake LLM or fake env must RECORD every outbound request, and tests must assert what was
+sent: the exact prompt text, the stop list, temperature and max_tokens on each call. A test
+that only checks the returned value cannot see a client that silently stops forwarding
+temperature, which would turn CoT-SC's 21 samples into 21 greedy duplicates at full price.
+
+### Rule 12 — counters are tested with distinct values, never coincidentally equal
+
+When a test asserts two related counters (n_calls and n_badcalls, requests and rows, samples
+and cache entries), construct the scenario so the two numbers DIFFER, and use at least three
+of the thing being counted. Asserting 1 == 1 cannot distinguish "incremented on parse failure"
+from "incremented on every call".
