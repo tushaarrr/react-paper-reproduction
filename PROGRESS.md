@@ -5,7 +5,7 @@ Commit after every step. Tag `v1-reproduced` after step 08 comes back clean.
 
 ## Setup
 - [x] `./setup.sh` runs clean (prints "first 5 eval indices: [3687, 6238, 5388, 3522, 3824] OK")
-- [~] `.env` — MODEL=gpt-4o-mini set; OPENAI_API_KEY still empty (owner to fill)
+- [x] `.env` filled in with MODEL=gpt-4o-mini and a working OPENAI_API_KEY (auth verified)
 - [x] `git init && git add . && git commit -m "scaffold"`
 
 ## Phase 1 — reproduce the prompting results

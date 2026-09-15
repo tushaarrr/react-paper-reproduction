@@ -41,6 +41,26 @@ reproduce them is wrong, regardless of how reasonable it looks.
 
 ## Fine-tuning (paper Section 3.3)
 - 3,000 bootstrapped trajectories, kept only where the final answer was correct.
+  (The bootstrap itself is described in Section 3.2, under the "Finetuning" paragraph;
+  Section 3.3 reports the results.)
 - PaLM-8B and 62B, batch size 64, 4,000 steps for ReAct and Act.
-- Claim A: fine-tuned ReAct-8B beats every PROMPTING method on the 540B model.
+  (Appendix B.1 adds: Standard and CoT get 2,000 steps on 8B and 1,000 on 62B.)
+- Claim A: fine-tuning buys about ONE model tier, not two. Section 3.3, verbatim:
+  "PaLM-8B finetuned ReAct outperforming all PaLM-62B prompting methods", and
+  "PaLM-62B finetuned ReAct outperforming all 540B prompting methods".
+  So the two testable orderings are:
+    A1: 8B-finetuned ReAct  > every 62B  prompting method
+    A2: 62B-finetuned ReAct > every 540B prompting method
 - Claim B: fine-tuning Standard or CoT is much worse than fine-tuning ReAct or Act.
+  Section 3.3's wording is "significantly worse ... for both PaLM-8/62B"; "much worse"
+  above is a paraphrase that agrees in substance.
+
+> CORRECTION (see CLAUDE.md "Corrections log"). An earlier version of this file stated
+> Claim A as "fine-tuned ReAct-8B beats every PROMPTING method on the 540B model."
+> That was WRONG: it attributed the 62B-finetuned result to the 8B model, overstating
+> the effect by a full model tier. Corrected against the paper text.
+
+Neither A1 nor A2 is directly reproducible here — we fine-tune one small open model, not
+PaLM-8B/62B, and our teacher is a small API model rather than PaLM-540B. Phase 3 tests the
+ORDERING at a single scale (fine-tuned ReAct beats fine-tuned Standard/CoT/Act, and beats
+the same model prompted with six exemplars), not the absolute cross-scale claim.

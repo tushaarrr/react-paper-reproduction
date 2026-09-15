@@ -32,3 +32,39 @@ fine-tuning experiment (Section 3.3).
 8. Ask before starting any run over 100 questions, and before any run whose
    estimated cost passes $5.
 9. Never commit `data/`, `runs/`, `.env`, or model weights.
+
+## Corrections log
+
+Defects found in this project's OWN files and fixed at source. Newest last.
+
+1. `tests/EXPECTED.md` — fine-tuning Claim A said "fine-tuned ReAct-8B beats every
+   PROMPTING method on the 540B model". Wrong by a full model tier. Paper §3.3 says
+   "PaLM-8B finetuned ReAct outperforming all PaLM-62B prompting methods" and
+   "PaLM-62B finetuned ReAct outperforming all 540B prompting methods". Split into
+   testable orderings A1/A2 and marked not directly reproducible at our scale.
+2. `prompts/claude-code/02-environment.md` — omitted two load-bearing behaviours of
+   `reference/wikienv.py`: the disambiguation recursion `search_step("[" + entity + "]")`
+   (why the exemplars read `Could not find [Adam Clayton Powell]` with literal brackets),
+   and `clean_str`, including that the driver's `obs.replace('\\n','')` strips a literal
+   backslash-n rather than a newline. Added both, plus five required mutation checks.
+3. `prompts/claude-code/10-collect-trajectories.md` — its $15 cost gate silently conflicted
+   with rule 8's $5. Both are now explicit and cumulative: $5 binding, $15 a second hard
+   checkpoint that stops again even after $5 was approved.
+4. `prompts/claude-code/05-react-graph.md` — specifies setting `hit_step_limit=True` and
+   calling `finish[]` inside a LangGraph conditional edge. Not implementable: verified
+   against langgraph 1.2.11 that a path function's state writes are discarded, so
+   `hit_step_limit` would have stayed `False` in every step-limited episode and the
+   README's `%hit_step_limit` column would have read 0% while being wrong. The step limit
+   needs a `force_finish` NODE with a pure router. Corrected at source in the prompt file,
+   and recorded in `paper/notes.md` (D22).
+5. `.gitignore` / `setup.sh` — `.gitignore` excluded only `data/sft/` while rule 9 forbids
+   committing `data/` at all. Widened, and `setup.sh` now restores `data/` and `prompts/`
+   from the reference clone (both are byte-identical to it) so a clean clone still works.
+
+### Rule 10
+
+If you find another defect in a file this repo treats as authoritative — `CLAUDE.md`,
+`tests/EXPECTED.md`, `paper/targets.csv`, anything under `prompts/` — fix it at source,
+append a line to this log, and tell me. Never fix it silently. Never leave a file that
+CLAUDE.md calls authoritative knowingly wrong, and never work around such a defect in
+`src/` while leaving the source of truth uncorrected.

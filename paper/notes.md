@@ -259,8 +259,11 @@ Article vs. results page is decided purely by `soup.find_all("div", {"class": "m
       if not p.endswith("\n"):          # :119  tested on the PRE-clean_str block
         self.page += "\n"               # :120
   ```
-  `"\n".join(kept)` is **wrong**: it differs whenever a block already ends in a newline, and it omits the trailing newline
-  after the last block. Either difference shifts the `'. '` split and therefore the 5-sentence observation.
+  The **separator between blocks is load-bearing**: drop it and adjacent blocks fuse into one `'. '` split, shifting the
+  5-sentence observation. The trailing newline after the last block is **not**, and neither is `:119`'s `endswith("\n")`
+  guard — blocks come from `p.get_text().strip()` (`:111`), so the guard is never true, and `get_page_obs` drops empty
+  paragraphs anyway. `"\n".join(kept)` is therefore **equivalent** here; we write the loop for line-parity with `:115-120`
+  but omit the unreachable guard (`src/wiki_env.py:115-120`).
   Then `get_page_obs` (`:76-87`):
   ```python
   paragraphs = page.split("\n"); paragraphs = [p.strip() for p in paragraphs if p.strip()]
@@ -346,13 +349,16 @@ Everything above assumes an HTTP GET. That GET is **ours**, not the reference's:
 the **cache** and the **retries** — that line reads in full "A disk cache (sqlite or a JSON directory) keyed by the exact URL,
 so reruns never hit the network. Retry timeouts up to 10 times." and says nothing about a header. **The `User-Agent` is ours
 (D18)**, because bare-UA requests to `en.wikipedia.org` are 403'd today; it belongs in the deviations table, and is not
-quoted here as a prompt requirement. All three live in one function, `WikiEnv._fetch(url)`, owned and tested by C1:
+quoted here as a prompt requirement. All four live in one function, `WikiEnv._fetch(url)`, owned and tested by C1 (the fourth, `response.raise_for_status()`, is ours — see the deviations table):
 
 * **Disk cache keyed by the exact URL.** Format: a **JSON directory**, `data/cache/wiki/<sha256(url)>.json`, each file
   `{"url": ..., "fetched_at": ..., "html": ...}`. (`02-environment.md:6` allows sqlite or a JSON directory; pinning one
   stops C1 and C3 each inventing a different store. The LLM cache is the separate store described in C3.) A second call for
   the same URL makes **zero** network calls and returns byte-identical text.
-* **Up to 10 retries on timeout** (`02-environment.md:6`), replacing the reference's dead retry helper (`hotpotqa.ipynb:46-52`).
+* **Up to 10 attempts on timeout** — 1 initial try + 9 retries; 10 consecutive timeouts raise (`02-environment.md:6`,
+  which says "retry timeouts up to 10 times"; the reference's dead helper it replaces, `hotpotqa.ipynb:46-52`, is
+  `attempts = 0; while attempts < 10`, i.e. 10 attempts total). `MAX_ATTEMPTS = 10`; C1(k) pins it. Do **not** "fix" this
+  to 11 attempts to match a literal reading of "10 retries" — that breaks C1(k).
 * **A `User-Agent` header.** Bare-UA requests to `en.wikipedia.org` are 403'd today. The exact string, used by the env and
   by every recorded fixture:
   ```text
@@ -802,7 +808,7 @@ content. A row with a location outside this section has a stub heading below poi
 | D15 | step accounting for the no-tool and combination conditions | **§1, "Step accounting for every condition"**, and the C8 JSONL schema bullets; stub below |
 | D16 | price table and our model name | **§5, "Model and price table (D16)"**; stub below |
 | D17 | Act: the action is the first line of the completion | **folded into D5** below, asserted in C5; stub below |
-| D18 | `WikiEnv._fetch` — disk cache, 10 retries, User-Agent | **§2, "The fetch layer — `WikiEnv._fetch(url)` (D18)"**, tests in C1(i)(j)(k); stub below |
+| D18 | `WikiEnv._fetch` — disk cache, 10 attempts on timeout (1 try + 9 retries), User-Agent | **§2, "The fetch layer — `WikiEnv._fetch(url)` (D18)"**, tests in C1(i)(j)(k); stub below |
 | D19 | record the fixture before pinning its literal | **§2, the "Failure (results page)" bullet**, asserted in C1(c); stub below |
 | D20 | `EXPECTED.md:44` is partially untestable here | **§ "Disagreements with tests/EXPECTED.md" → L44**, plus a fine-tuning row in the deviations table; stub below |
 | D21 | env ownership and lifecycle — `build_graph(condition, env)`, `run_one` resets once per question, env is not a state field | **§1, "The env is not in the state"**, tested in C8; stub below |
@@ -977,10 +983,11 @@ and the rates are a local constant that must be re-checked before any cost total
 Stub. **Folded into D5** above and asserted in C5, because that is where step 05/06 looks. Summary:
 `action = completion.strip().split("\n")[0]`; an empty first line, or one with no `[`, counts as a bad call.
 
-### D18 — `WikiEnv._fetch`: disk cache, 10 retries, User-Agent
+### D18 — `WikiEnv._fetch`: disk cache, 10 attempts on timeout, User-Agent
 
 Stub. Defined in **§2, "The fetch layer — `WikiEnv._fetch(url)` (D18)"**, tested by C1(i)(j)(k). Summary: JSON-directory
-cache at `data/cache/wiki/<sha256(url)>.json` keyed by the exact URL, up to 10 retries on timeout, and the User-Agent
+cache at `data/cache/wiki/<sha256(url)>.json` keyed by the exact URL, up to 10 attempts on timeout (1 initial try + 9
+retries; 10 consecutive timeouts raise), and the User-Agent
 `react-langgraph-repro/0.1 (research reproduction; contact via repo)` — recorded once so fixtures are reproducible.
 
 ### D19 — record the fixture before pinning its literal
@@ -1113,6 +1120,8 @@ Each row states the change and a **one-line estimate of its likely effect on res
 |---|---|---|
 | Disk cache on every LLM call and every Wikipedia fetch | keyed by `(model, system_message, prompt, stop, temperature, max_tokens, sample_index)` for LLM, by exact URL for Wikipedia (CLAUDE.md rule 5). **`system_message` is one field more than `04-llm-client.md:4` lists (D28)** — without it rule 5's "keyed by the exact input" is false, because every request carries both the prompt and the system message | None on EM at temperature 0; at 0.7 it *freezes* sampling noise, making CoT-SC reruns reproducible rather than re-sampled. The extra key field is what stops an edit to the system message — the one knob flagged below as likely to be tuned — from silently serving the whole 500-question run from stale completions |
 | Real 10-attempt fetch retry with a `User-Agent` header (D18) | the reference retry is dead code (`requests` never imported) and bare-UA requests to `en.wikipedia.org` are 403'd today. UA string, fixed: `react-langgraph-repro/0.1 (research reproduction; contact via repo)` — the same string records every fixture | None on EM; without it the run cannot complete at all |
+| **`response.raise_for_status()` in `_fetch` (D18)** | the reference does none of it (`requests.get(search_url).text`, `wikienv.py:99-102`). Only `Timeout` is retried, so a non-2xx is **not** retried: it propagates out of `_fetch` and stops the run | A transient 403/429/503 aborts the run loudly instead of being parsed as an article and written into the **permanent** disk cache, where it would silently poison every rerun of a 500-question run. Cost: a rare transient error needs a restart (the cache makes the restart cheap). Asserted in C1: a 500 raises `HTTPError` and writes no cache file |
+| **`timeout=30` on the `_fetch` GET (D18)** | the reference passes no `timeout=` (`wikienv.py:99-102`), so its `except requests.exceptions.Timeout` in the driver (`hotpotqa.ipynb:46-52`) can never fire — a hung socket blocks forever. A retry policy needs a timeout to retry *from*, so we set one | None on EM. Bounds a hung request at 30s instead of indefinitely; a slow-but-alive Wikipedia response under 30s is unaffected. Too small a value would convert healthy responses into 10 wasted retries, so the magnitude is asserted in C1, not just its presence |
 | `hit_step_limit` flag, per-question JSONL, `results/calls.csv` | CLAUDE.md rules 5 and 6 | None on EM; `hit_step_limit` is the input to D6's `react_to_cotsc` |
 | **Chat-vs-completion adaptation** | the reference calls a raw completion endpoint with a single prompt string (`hotpotqa.ipynb:22-32`); we send the identical completion-style prompt as **one user message** to a chat model (`04-llm-client.md:1`) | Chat models are RLHF-tuned to answer rather than continue text; expect more preamble and more parse failures than davinci-002, i.e. higher `n_badcalls` and a small EM drag unless the system message below compensates |
 | **System message** | short, fixed, identical across all conditions and both tasks — **our wording** for the requirement at `04-llm-client.md:1` (which states it in prose and contains no such literal; `grep -rn "Continue the text exactly in the format" prompts/claude-code/` → 0 hits): *"Continue the text exactly in the format of the examples. Do not write an Observation line; stop before it."* It is part of the cache key (row 1) | Suppresses conversational answers and raises parse success; may **inflate** EM relative to a raw completion model, since it supplies format guidance the reference's prompt did not. Because it is constant across conditions it should not reorder them |
