@@ -125,12 +125,30 @@ sent: the exact prompt text, the stop list, temperature and max_tokens on each c
 that only checks the returned value cannot see a client that silently stops forwarding
 temperature, which would turn CoT-SC's 21 samples into 21 greedy duplicates at full price.
 
-### Rule 12 — counters are tested with distinct values, never coincidentally equal
+### Rule 12 — a fixture must separate every plausible wrong implementation
 
-When a test asserts two related counters (n_calls and n_badcalls, requests and rows, samples
-and cache entries), construct the scenario so the two numbers DIFFER, and use at least three
-of the thing being counted. Asserting 1 == 1 cannot distinguish "incremented on parse failure"
-from "incremented on every call".
+A fixture's values must be chosen so that every plausible WRONG implementation produces a
+DIFFERENT result from the correct one. Before writing one, enumerate the wrong implementations
+you are excluding, then pick values that separate all of them:
+
+  aggregation   sum / max / first / last / mean      -> three rows with distinct values, no two
+                                                        of which coincide under any of them
+  metric        em / f1                              -> at least one row where em != f1
+  counts        winner count / total / non-empty      -> a vote fixture where all three differ
+  selection     first / last / lowest-index           -> a tie whose members sit at known indices
+
+Three rows is the MINIMUM, not the requirement — the requirement is separation. A fixture where
+every candidate implementation returns the same answer makes its assertion vacuous, however many
+rows it has.
+
+**Why:** three defects in this repo shared exactly this shape. A one-row spend ledger made sum,
+max, first and last indistinguishable, so `_spend_so_far` returning `max` passed every budget test
+while the $5 ceiling could never fire. Both combine fixtures had `f1 == em` on all ten rows, so the
+results.csv metric column could silently become mean F1 — systematically higher than EM — and we
+would have concluded we beat the paper. A single-sample vote fixture could not tell the winner's
+count from the sample total.
+
+Applies retroactively: every fixture in `tests/` is audited against this rule.
 
 ### Rule 13 — the test suite can never spend money
 
