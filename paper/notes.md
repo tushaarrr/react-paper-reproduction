@@ -1659,3 +1659,96 @@ unfalsifiable — we would be comparing Standard against Standard-at-0.7 and rep
 byte-equal to `build_prompt(q, task, "cot")`, ends `\nThought:` and differs from the Standard
 prompt, on both tasks.
 
+## Power, and the pre-registered decision rule
+
+Written after `standard` and `cot` completed at n=500 and BEFORE `act`, `react` and `cotsc` landed.
+Every number here was independently re-derived three ways (exact enumeration, 200k-replicate Monte
+Carlo, and the normal closed form) before being written down.
+
+### What the completed runs show about resolution
+
+| quantity | value |
+|---|---|
+| paired questions | 500 |
+| standard EM / cot EM | 29.2 / 35.2 |
+| discordant b (cot right, std wrong) / c (reverse) | 53 / 23 |
+| **b + c** | **76** (15.2%) |
+| concordant, carrying NO information about the difference | 424 (84.8%) |
+
+**Minimum detectable EM difference, exact two-sided McNemar, 80% power, alpha 0.05: 5.17 points**
+(rejection region k<=28 or k>=48; p80 = 0.6702). Monte Carlo agrees to 0.001; the normal form gives
+4.885, and the 5.9% gap is fully explained by discreteness.
+
+**This figure carries +/- 0.5 points of its own sampling noise.** `n_disc = 76` is an estimate, not
+a design constant (sd 8.02, 95% range [61, 92]), so the MDD's own 95% range is **[4.38, 5.37]**.
+Quote it as "about 5 points", never as 5.17.
+
+**It does not transfer between pairs.** MDD grows roughly as sqrt(n_disc):
+
+| n_disc | rate | MDD | max possible \|diff\| | MDD as % of that ceiling |
+|---|---|---|---|---|
+| 40 | 0.08 | 3.55 | 8.0 | 44% |
+| 76 | 0.152 | 5.17 | 15.2 | 34% |
+| 150 | 0.30 | 7.00 | 30.0 | 23% |
+| 300 | 0.60 | 9.87 | 60.0 | 17% |
+
+Do NOT read this as "pairs that disagree more are harder to resolve". Discordance is not a knob, it
+is a property of the two systems, and it CAPS the effect (|diff| <= n_disc/N). Relative to the
+effects that can exist at that discordance, high discordance is much easier. Each pair gets its own
+n_disc and its own MDD, computed when its runs land. Below n_disc ~ 6 the exact two-sided test
+cannot reject at 0.05 at ANY effect size, so MDD is undefined rather than small.
+
+### The decision rule (pre-registered)
+
+An earlier draft of this section proposed: mark a claim INCONCLUSIVE when the PAPER's reported gap
+falls below our MDD. **That rule is wrong and is not used.** It is the post-hoc power fallacy, and
+our own data is the counterexample: cot - standard is +6.00 points, p = 7.6e-04, 95% CI
+[+2.62, +9.38]; the paper's gap for that pair is +0.70, which is below 5.17, so the rule would stamp
+INCONCLUSIVE on a result we resolved at p < 0.001 whose interval excludes both zero and the paper's
+value. Once a test rejects, the power to detect some other effect size is irrelevant to it. A rule
+that can discard our strongest finding is not a pre-registration.
+
+What the MDD legitimately licenses is exactly one sentence, and only when we FAIL to reject: *this
+design could not have detected an effect as small as the paper reports, so the null result is
+uninformative about a paper-sized effect.* It says nothing when we do reject.
+
+**The rule in force, decided before act/react/cotsc landed, on the bootstrap 95% CI of our own
+paired difference:**
+
+| verdict | condition | strength |
+|---|---|---|
+| **SUPPORTED** | CI excludes 0 and the direction matches the paper | strong |
+| **CONSISTENT WITH PAPER** | CI contains the paper's gap | moderate |
+| **CONTRADICTS PAPER** | CI excludes the paper's gap | strong, and worth investigating |
+| **INCONCLUSIVE** | CI contains BOTH 0 and the paper's gap | the honest default |
+
+The CI is reported on EVERY row, including inconclusive ones: it carries the effect size regardless
+of what the test decides, and it is the only column that stays interpretable when the test is
+underpowered.
+
+### Asymmetry of the verdicts
+
+Calibration (300 replicates, n=200) put the exact test's type-I rate at **0.017 against a nominal
+0.05** -- correctly conservative for a discrete test, never anti-conservative. Consequences:
+
+1. **SUPPORTED is a strong verdict.** The test rejects less often than nominal, so a rejection is
+   harder-won than the p-value alone suggests.
+2. **Power is correspondingly reduced**, so a failure to reject is weak evidence of absence.
+3. **NOT SUPPORTED is therefore never written.** The phrase is **"no evidence at this power"**, and
+   it is never a refutation of the paper. We are running a different model, four years later, at
+   n=500; the paper reported PaLM-540B. A null here is a statement about our experiment.
+
+Do NOT recompute power at alpha = 0.017. That is a category error: the conservatism already lives
+inside the exact rejection region, and feeding the achieved rate back in as a nominal level
+double-counts it. (An earlier draft reported 5.56 points on that basis; it is withdrawn.)
+
+### Claim 4 is structurally not an independent test
+
+Both combinations are deterministic functions of the react and cotsc runs. `react_to_cotsc` can
+differ from `react` ONLY on questions where ReAct hit the step limit, so its discordant table is
+entirely conditioned on a subset selected by ReAct's own failures, and c is bounded above by the
+step-limit count. McNemar there answers "does substituting CoT-SC on ReAct's failures help?", which
+is worth knowing and is NOT the independent-method comparison claims 1-3 make. Against methods that
+share no machinery (`react_to_cotsc` vs `cot`, vs `standard`) the comparison is clean. The claims
+table reports the split, never four uniform p-values.
+
