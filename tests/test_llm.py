@@ -464,3 +464,44 @@ def test_the_real_client_carries_the_reference_decoding_params(monkeypatch):
     # while _key() and _log_call() had already moved on to the new one.
     monkeypatch.setattr(llm, "MODEL", LOCAL)
     assert llm._client()._get_request_payload([llm.HumanMessage("p")])["model"] == LOCAL
+
+
+# -- the three holes the adversarial budget-guard pass found -----------------
+
+def test_a_provider_that_omits_usage_is_refused_not_logged_as_free(monkeypatch, tmp_path):
+    """H-1. langchain-openai yields token_usage=None whenever the endpoint omits
+    `usage` (vLLM, Ollama, streaming without include_usage). Logging that as a
+    $0.00 row leaves _spend_so_far() at 0.0 for the whole run, so rule 8's ceiling
+    can never fire. Fail closed instead: a priced model must refuse."""
+    fake = install(monkeypatch, tmp_path, FakeClient(usage=None))
+    with pytest.raises(llm.MissingUsage):
+        llm.complete("p", STOP)
+    assert not llm.CALLS_CSV.exists(), "no $0.00 row may reach the ledger"
+    # and the same response on a deliberately-free model logs zeros instead
+    fake = install(monkeypatch, tmp_path / "local", FakeClient(usage=None), model=LOCAL)
+    assert llm.complete("p", STOP) == [CUT]
+    assert llm._spend_so_far() == 0.0
+
+
+def test_an_empty_calls_csv_still_gets_its_header(monkeypatch, tmp_path):
+    """H-2. A touched / truncated / half-written ledger still `exists()`, so the
+    rows would be appended headerless and every later _spend_so_far() would die on
+    KeyError with the money already spent and no way to resume."""
+    install(monkeypatch, tmp_path, FakeClient(usage=BIG))
+    llm.CALLS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    llm.CALLS_CSV.touch()                      # exists, size 0
+    llm.complete("p", STOP)
+    assert llm.CALLS_CSV.read_text().splitlines()[0].startswith("timestamp,")
+    assert llm._spend_so_far() == pytest.approx(0.15)
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "Infinity"])
+def test_a_non_finite_ceiling_is_refused_at_import(monkeypatch, bad):
+    """H-3. nan makes `spent + estimate > MAX_SPEND_USD` always False and inf never
+    trips, so either silently removes the ceiling. Must fail loudly, not quietly."""
+    monkeypatch.setenv("MAX_SPEND_USD", bad)
+    with pytest.raises(ValueError, match="finite"):
+        importlib.reload(llm)
+    monkeypatch.delenv("MAX_SPEND_USD")
+    importlib.reload(llm)                      # leave the module healthy
+    assert llm.MAX_SPEND_USD == 5.00

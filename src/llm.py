@@ -56,6 +56,12 @@ CALLS_HEADER = [
 
 MODEL = os.getenv("MODEL", "gpt-4o-mini")
 MAX_SPEND_USD = float(os.getenv("MAX_SPEND_USD", "5.00"))
+if not (0 <= MAX_SPEND_USD < float("inf")):
+    # nan makes every `spent + estimate > MAX_SPEND_USD` comparison False and inf
+    # never trips, so either would disable rule 8 with no error and no warning.
+    raise ValueError(
+        f"MAX_SPEND_USD must be finite and >= 0, got {MAX_SPEND_USD!r}"
+    )
 
 # notes.md section 5, D16: USD per 1M tokens, (input, output), rates of 2026-09-15.
 # A model ABSENT from this table is refused before its first call (_check_budget):
@@ -87,6 +93,12 @@ RETRYABLE = (
 class BudgetExceeded(RuntimeError):
     """CLAUDE.md rule 8: raised before the call that would cross MAX_SPEND_USD."""
 
+
+
+class MissingUsage(RuntimeError):
+    """Raised after a priced call whose response carried no token usage.
+    Logging it as $0.00 would silently zero rule 8's ledger."""
+    pass
 
 def complete(prompt, stop, temperature=0.0, max_tokens=100, n=1):
     """-> list[str] of n completions, each cut at the first stop string.
@@ -234,10 +246,34 @@ def _log_call(usage, sample_index):
     """One row per real request. Token counts are the response's own usage numbers,
     never a local estimate — a mis-estimate would silently mis-gate rule 8.
     `cache_hit` is always False: a hit issues no request and writes no row (C3)."""
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
+    prompt_tokens = usage.get("prompt_tokens") or 0
+    completion_tokens = usage.get("completion_tokens") or 0
+    if not prompt_tokens:
+        # The response carried no usage. langchain-openai returns None here whenever
+        # the endpoint omits `usage` — OpenAI-compatible servers (vLLM, Ollama, the
+        # LOCAL_BASE_URL in .env) and streaming without include_usage all do.
+        # Logging a $0.00 row would leave _spend_so_far() at 0.0 for the whole run,
+        # so rule 8's ceiling could never fire: the guard switches itself off with no
+        # symptom. Charging a local estimate instead is not allowed either
+        # (04-llm-client.md:6 — counts come from usage, never an estimate), so the
+        # only honest move is to fail closed and make the operator decide.
+        in_rate, out_rate = PRICES[MODEL]
+        if in_rate or out_rate:
+            raise MissingUsage(
+                f"{MODEL} returned no token usage, so this call cannot be costed. "
+                f"Refusing to write a $0.00 row: that would zero the rule 8 ledger "
+                f"and disable the ${MAX_SPEND_USD:.2f} ceiling for the rest of the "
+                f"run. The call was already billed by the provider."
+            )
+        logging.warning(
+            "%s returned no token usage; logging zeros (model is priced 0.0/0.0, "
+            "so spend is unaffected, but tokens/sec cannot be measured).", MODEL
+        )
     CALLS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not CALLS_CSV.exists()
+    # An empty file (touched, truncated by an editor, or a killed write) still
+    # "exists", so without the size check the rows go in headerless and every
+    # later _spend_so_far() dies on KeyError with the spend already made.
+    write_header = not CALLS_CSV.exists() or CALLS_CSV.stat().st_size == 0
     with open(CALLS_CSV, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:

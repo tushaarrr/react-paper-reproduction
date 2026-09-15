@@ -641,7 +641,7 @@ from a small price table in the file"). Rates as of **2026-09-15**, USD per 1M t
 | model | input $/1M | output $/1M |
 |---|---|---|
 | `gpt-4o-mini` | 0.15 | 0.60 |
-| any locally served model (phase 3: merged adapter on vLLM/Ollama) | 0.0 | 0.0 |
+| `qwen2.5-3b-prompted`, `qwen2.5-3b-react-lora`, `qwen2.5-3b-react-lora-q4` (phase 3, served locally) | 0.0 | 0.0 |
 
 * `prompt_tokens` / `completion_tokens` come from the **provider response's `usage` field**, never from a local tokenizer
   estimate — a mis-estimate would silently mis-gate rule 8.
