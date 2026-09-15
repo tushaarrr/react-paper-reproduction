@@ -17,7 +17,9 @@ Commit after every step. Tag `v1-reproduced` after step 08 comes back clean.
 - [x] 04 llm client       -> cache test passes, results/calls.csv appears
       (79 tests; 45 mutations killed + 3 adversarial budget holes closed;
        one live call: 1615+41 tok, $0.00026685)
-- [ ] 05 react graph      -> fake-LLM tests pass, 3 real trajectories look sane
+- [x] 05 react graph      -> fake-LLM tests pass, 3 real trajectories look sane
+      (99 tests; reference replay 23/23 byte-identical; 3 live questions,
+       0/3 EM, 2 hit the 7-step limit, $0.004994)
 - [ ] 06 baselines        -> 100-question table printed next to targets.csv
 - [ ] 07 full runs        -> README.md has the results table and 4 claims marked
 
