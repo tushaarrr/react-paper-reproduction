@@ -25,7 +25,24 @@ from src import combine, data, llm, run
 Q0 = 3687  # tests/EXPECTED.md: the first five eval indices are fixed
 FINISH = "I know this.\nAction 1: Finish[Arthur's Magazine]"
 SEARCH = [f"looking.\nAction {i}: Search[Arthur's Magazine]" for i in range(1, 9)]
-NINE_SEVEN_FIVE = ["Bravo"] * 7 + ["Alpha"] * 9 + ["Charlie"] * 5  # winner Alpha with 9 of 21 votes
+
+# The vote fixture, shared with tests/test_baselines.py: 21 samples, of which 4 parse to
+# nothing. Every count it could be confused with is a different number (rule 12) —
+# winner 9, runner-up 5, third 3, empty 4, non-empty 17, distinct answers 3, total 21 —
+# and the first answer to appear ("Bravo") is deliberately not the winner.
+SAMPLES_9_5_3_4EMPTY = ["Bravo"] * 5 + ["Alpha"] * 9 + ["Charlie"] * 3 + [""] * 4
+
+# Two questions whose loops differ in every number rule 12 cares about: question 1 needs
+# a parse-failure retry and finishes at step 2 (n_steps 2, n_calls 3 — so `n_steps` can
+# never be read as `n_calls`), question 2 runs to the step limit (n_steps 7). Mean steps
+# 4.5 is none of max 7 / first 2 / last 7 / sum 9 / mean n_calls 5, and one of the two
+# hitting the limit makes pct_hit_step_limit 50.0 — neither the fraction 0.5, nor the
+# count 1, nor the 0.0/100.0 that an all-or-nothing fixture leaves indistinguishable.
+RETRY_THEN_LIMIT = [
+    "I rambled without an action label.",   # no "\nAction 1: " -> a bad call and a retry
+    "Search[Arthur's Magazine]",            # the retry answers with the action alone
+    "I know this.\nAction 2: Finish[Arthur's Magazine]",
+] + SEARCH[:7]
 
 
 class FakeEnv:
@@ -69,7 +86,16 @@ def harness(monkeypatch, tmp_path):
     """-> a factory: harness(texts) installs the fakes and returns the recorder."""
     monkeypatch.setattr(run, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(combine, "RESULTS_CSV", tmp_path / "results.csv")
-    monkeypatch.setattr(llm, "CALLS_CSV", tmp_path / "calls.csv")  # spend ledger: empty
+    # The spend ledger starts NON-EMPTY (rule 12): with an empty one, a per-question
+    # `cost` that logged the cumulative spend instead of this question's delta would
+    # still read 0.0 on every line and be indistinguishable from the correct value.
+    # $0.0031 of someone else's prior run is on it, and every line below must read 0.0.
+    ledger = tmp_path / "calls.csv"
+    ledger.write_text(
+        ",".join(llm.CALLS_HEADER) + "\n"
+        "2026-09-15T00:00:00,gpt-4o-mini,0,20000,500,0.0031,False\n"
+    )
+    monkeypatch.setattr(llm, "CALLS_CSV", ledger)
     monkeypatch.setattr(llm, "MODEL", "gpt-4o-mini")
     monkeypatch.setattr(run.wiki_env, "WikiEnv", FakeEnv)
 
@@ -127,7 +153,7 @@ def test_more_than_100_questions_needs_an_explicit_ask(harness, tmp_path):
 
 
 def test_cotsc_is_budgeted_at_21_calls_a_question(harness, tmp_path):
-    fake = harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in NINE_SEVEN_FIVE])
+    fake = harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in SAMPLES_9_5_3_4EMPTY])
     run.main(["--task", "hotpotqa", "--condition", "cotsc", "--n", "1"])
     assert fake.budget[1] == 21
 
@@ -156,6 +182,10 @@ def test_every_line_carries_the_whole_schema_including_f1(harness, tmp_path):
         assert line["n_steps"] == 0 and line["hit_step_limit"] is False  # D15
         assert line["winner_votes"] is None and line["empty_samples"] is None
         assert line["trajectory"].startswith("Question: ")  # D25
+        # This question's own spend, not the ledger total: the harness seeded $0.0031 of
+        # prior spend, and no call here is billed, so the delta is 0.0 (rule 12).
+        assert line["cost"] == 0.0
+    assert llm._spend_so_far() == 0.0031
 
 
 def test_f1_is_logged_because_em_rejects_answers_that_are_not_wrong(harness):
@@ -169,16 +199,20 @@ def test_f1_is_logged_because_em_rejects_answers_that_are_not_wrong(harness):
     em, f1 = run.score("hotpotqa", "torpedoes and submarines", "torpedoes")
     assert (em, f1) == (0, 0.5)  # EM rejects it; F1 says how close it was
     assert run.score("fever", "REFUTES", "REFUTES") == (1, 1.0)
-    assert run.score("fever", "maybe", "REFUTES")[0] == 0  # not one of the 3 labels
+    # rule 12: the gold is "maybe" too, so plain exact_match would score this 1. FEVER's
+    # `em` column is §3's fever_score — a label whitelist — and nothing else separates the
+    # two on a pair whose prediction and gold disagree.
+    assert run.score("fever", "maybe", "maybe")[0] == 0  # not one of the 3 labels
 
 
 def test_the_cotsc_line_records_the_winners_votes_never_the_sample_count(harness, tmp_path):
-    harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in NINE_SEVEN_FIVE])
+    harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in SAMPLES_9_5_3_4EMPTY])
     run.main(["--task", "hotpotqa", "--condition", "cotsc", "--n", "1"])
     line = lines_of(tmp_path, "hotpotqa_cotsc_gpt-4o-mini.jsonl")[0]
     assert line["prediction"] == "Alpha"
-    assert line["winner_votes"] == 9  # not 21, and not the 7 of the first answer seen
-    assert line["empty_samples"] == 0
+    assert line["winner_votes"] == 9  # not 21, not 17 non-empty, not the first answer's 5
+    assert line["empty_samples"] == 4
+    assert line["n_badcalls"] == 4  # the empty samples, never the 21 that were issued
     assert line["n_calls"] == 21
     assert len(line["trajectory"]["samples"]) == 21
 
@@ -227,30 +261,42 @@ def test_one_env_serves_the_whole_run_and_is_reset_per_question(harness, monkeyp
 # -- results.csv (rule 6, D15) ---------------------------------------------
 
 def test_the_summary_row_carries_the_model_string(harness, tmp_path):
-    harness(["Arthur's Magazine"])
+    # One scripted answer PER QUESTION, against the five real golds, chosen so that every
+    # aggregate differs (rule 12): EM 1,0,1,0,0 -> mean 0.4, which is not max 1, not the
+    # first row's 1, not the last row's 0 and not the sum 2 — and mean F1 is 0.6333, so
+    # the metric column cannot silently become the F1 it would be systematically higher.
+    harness([
+        "Beyond the Clouds",  # 3687 gold "Beyond the Clouds"  -> em 1, f1 1.0
+        "Seth",               # 6238 gold "Seth MacFarlane"    -> em 0, f1 0.667
+        "torpedoes",          # 5388 gold "torpedoes"          -> em 1, f1 1.0
+        "Michael Jordan",     # 3522 gold "James Worthy"       -> em 0, f1 0.0
+        "Hillary Clinton",    # 3824 gold "Bill Clinton"       -> em 0, f1 0.5
+    ])
     run.main(["--task", "hotpotqa", "--condition", "standard", "--n", "5"])
     rows = list(csv.DictReader((tmp_path / "results.csv").open()))
     assert list(rows[0]) == combine.RESULTS_HEADER
     assert [rows[0][k] for k in ("task", "condition", "model", "n")] == \
         ["hotpotqa", "standard", "gpt-4o-mini", "5"]
     assert (rows[0]["mean_steps"], rows[0]["pct_hit_step_limit"]) == ("", "")  # D15
-    # rule 12: `metric` must be mean EM, not mean F1. The two are only
-    # distinguishable because the fixtures no longer set f1 == em on every row.
     lines = [json.loads(l) for l in
              (tmp_path / "runs" / "hotpotqa_standard_gpt-4o-mini.jsonl").read_text().splitlines()]
+    assert [l["em"] for l in lines] == [1, 0, 1, 0, 0]
     mean_em = sum(l["em"] for l in lines) / len(lines)
     mean_f1 = sum(l["f1"] for l in lines) / len(lines)
-    assert float(rows[0]["metric"]) == pytest.approx(mean_em)
-    if mean_em != mean_f1:
-        assert float(rows[0]["metric"]) != pytest.approx(mean_f1)
+    assert mean_f1 != mean_em  # the fixture separates the two columns, unconditionally
+    assert float(rows[0]["metric"]) == pytest.approx(mean_em) == pytest.approx(0.4)
+    assert float(rows[0]["metric"]) != pytest.approx(mean_f1)
 
 
 def test_a_react_summary_row_reports_steps_and_the_step_limit_rate(harness, tmp_path):
-    harness([FINISH])
-    run.main(["--task", "hotpotqa", "--condition", "react", "--n", "2"])
+    harness(RETRY_THEN_LIMIT)
+    lines = run.main(["--task", "hotpotqa", "--condition", "react", "--n", "2"])
+    # Question 1 retried once (3 calls for 2 steps); question 2 ran out of steps.
+    assert [(l["n_steps"], l["n_calls"]) for l in lines] == [(2, 3), (7, 7)]
+    assert [l["hit_step_limit"] for l in lines] == [False, True]
     row = list(csv.DictReader((tmp_path / "results.csv").open()))[0]
-    assert row["mean_steps"] == "1.0"
-    assert row["pct_hit_step_limit"] == "0.0"
+    assert row["mean_steps"] == "4.5"  # not max 7, first 2, last 7, sum 9, mean calls 5
+    assert row["pct_hit_step_limit"] == "50.0"  # a PERCENTAGE: not 0.5, not the count 1
 
 
 # -- the seam between the runner and src/combine.py ------------------------
@@ -261,7 +307,7 @@ def test_runner_output_feeds_the_combination_rules_unchanged(harness, tmp_path):
     after the 500-question runs were paid for."""
     harness(SEARCH[:7] * 2)  # every question exhausts the 7 steps
     run.main(["--task", "hotpotqa", "--condition", "react", "--n", "2"])
-    harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in NINE_SEVEN_FIVE])
+    harness(lambda prompt, n: [f"...\nAnswer: {p}" for p in SAMPLES_9_5_3_4EMPTY])
     run.main(["--task", "hotpotqa", "--condition", "cotsc", "--n", "2"])
 
     react = tmp_path / "runs" / "hotpotqa_react_gpt-4o-mini.jsonl"

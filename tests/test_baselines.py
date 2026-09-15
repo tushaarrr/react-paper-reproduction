@@ -29,10 +29,15 @@ Q = "Which magazine was started first Arthur's Magazine or First for Women?"
 C = "Stranger Things is set in Bloomington, Indiana."
 HEADER_OPENING = "Solve a question answering task"  # D1: never on a baseline prompt
 
-# The 9/7/5 fixture. Every aggregate is a DISTINCT number, so no two of them can be
-# confused by a passing test (rule 12): total 21, winner 9, runner-up 7, third 5, and
-# the FIRST answer to appear ("Bravo", 7) is deliberately not the winner.
-NINE_SEVEN_FIVE = ["Bravo"] * 7 + ["Alpha"] * 9 + ["Charlie"] * 5
+# The vote fixture, shared with tests/test_run.py. Every aggregate is a DISTINCT number,
+# so no two of them can be confused by a passing test (rule 12): total 21, winner 9,
+# runner-up 5, third 3, empty 4, non-empty 17, distinct answers 3 — and the FIRST answer
+# to appear ("Bravo", 5) is deliberately not the winner.
+#
+# The four empty samples are what separate the counts that an all-parsed fixture leaves
+# equal: `empty_samples`/`n_badcalls` (4) from the sample total (21) and from the
+# non-empty count (17), and the vote tally's sum (17) from the paper's n (21).
+SAMPLES_9_5_3_4EMPTY = ["Bravo"] * 5 + ["Alpha"] * 9 + ["Charlie"] * 3 + [""] * 4
 
 
 class FakeLLM:
@@ -181,6 +186,12 @@ def test_standard_does_not_reparse_its_own_completion(fake):
     here would return "" for every well-formed completion)."""
     fake(" Arthur's Magazine")
     assert baselines.standard(Q, "hotpotqa")["prediction"] == "Arthur's Magazine"
+    # rule 12: a completion with no `Answer:` in it cannot separate D2's `.strip()` from a
+    # DEFENSIVE `parse_answer(completion) or completion.strip()`, which silently repairs a
+    # chat model's echo of the label it was continuing instead of scoring what it said —
+    # the corrections-log entry 8 failure mode, in the one condition with no retry path.
+    fake(" Answer: Arthur's Magazine")
+    assert baselines.standard(Q, "hotpotqa")["prediction"] == "Answer: Arthur's Magazine"
 
 
 # -- CLAUDE.md rule 4: the decoding parameters that actually go out --------
@@ -232,22 +243,28 @@ def test_cot_sc_is_free_on_a_warm_cache(monkeypatch, tmp_path):
 # -- D4 / D13: the vote ----------------------------------------------------
 
 def test_majority_vote_returns_the_winner_and_the_winners_own_count():
-    winner, votes, empty = baselines.majority_vote(NINE_SEVEN_FIVE)
-    assert (winner, votes, empty) == ("Alpha", 9, 0)
-    assert len(NINE_SEVEN_FIVE) == 21
+    winner, votes, empty = baselines.majority_vote(SAMPLES_9_5_3_4EMPTY)
+    assert (winner, votes, empty) == ("Alpha", 9, 4)
+    assert len(SAMPLES_9_5_3_4EMPTY) == 21
     # Every aggregate this could be confused with is a different number (rule 12):
-    assert votes != len(NINE_SEVEN_FIVE)      # not the sample total (mutation 6)
-    assert votes != NINE_SEVEN_FIVE.count("Bravo")  # not the first answer's count
-    assert votes != len(set(NINE_SEVEN_FIVE))   # not the number of distinct answers
+    assert votes != len(SAMPLES_9_5_3_4EMPTY)         # not the sample total (mutation 6)
+    assert votes != sum(1 for p in SAMPLES_9_5_3_4EMPTY if p)  # not the non-empty count
+    assert votes != SAMPLES_9_5_3_4EMPTY.count("Bravo")  # not the first answer's count
+    assert votes != len({p for p in SAMPLES_9_5_3_4EMPTY if p})  # not distinct answers
+    assert empty != len(SAMPLES_9_5_3_4EMPTY) and empty != votes
 
 
 def test_cot_sc_reports_the_winners_votes_not_the_sample_count(fake):
-    fake(*[f"...\nAnswer: {p}" for p in NINE_SEVEN_FIVE])
+    fake(*[f"...\nAnswer: {p}" for p in SAMPLES_9_5_3_4EMPTY])
     out = baselines.cot_sc(Q, "hotpotqa")
     assert out["prediction"] == "Alpha"
     assert out["winner_votes"] == 9
-    assert out["empty_samples"] == 0
-    assert out["trajectory"]["votes"] == {"bravo": 7, "alpha": 9, "charlie": 5}
+    assert out["empty_samples"] == 4
+    # A sample with no answer is a bad call (D3), so this is the EMPTY count — never the
+    # 21 samples that were issued, and never the 17 that parsed.
+    assert out["n_badcalls"] == 4
+    assert out["n_calls"] == 21
+    assert out["trajectory"]["votes"] == {"bravo": 5, "alpha": 9, "charlie": 3}
 
 
 def test_the_vote_is_over_normalized_answers_but_the_winner_stays_raw():
@@ -285,11 +302,14 @@ def test_all_samples_empty_gives_an_empty_prediction_and_zero_votes(fake):
 
 
 def test_the_trajectory_carries_all_21_raw_samples_and_the_winning_one(fake):
-    fake(*[f"thought {i}.\nAnswer: {p}" for i, p in enumerate(NINE_SEVEN_FIVE)])
+    fake(*[f"thought {i}.\nAnswer: {p}" for i, p in enumerate(SAMPLES_9_5_3_4EMPTY)])
     traj = baselines.cot_sc(Q, "hotpotqa")["trajectory"]
     assert len(traj["samples"]) == 21
-    assert traj["winner"] == "thought 7.\nAnswer: Alpha"  # the first Alpha, index 7
-    assert sum(traj["votes"].values()) == 21
+    assert traj["winner"] == "thought 5.\nAnswer: Alpha"  # the first Alpha, index 5
+    # The tally counts the samples that PARSED, so it sums to 17 and not to the 21 stored
+    # beside it — an all-parsed fixture cannot tell those two totals apart (rule 12).
+    assert sum(traj["votes"].values()) == 17
+    assert len(traj["samples"]) == 21
 
 
 # -- N50/N51: the CoT-SC PROMPT itself was never asserted ---------------------

@@ -8,19 +8,31 @@ post-processing over two `runs/` files).
 The fixture pair is C7's, literally: `tests/fixtures/combine_react.jsonl` and
 `combine_cotsc.jsonl`, 5 rows joined on `idx`.
 
-| idx | react hit_step_limit | react em | cotsc winner_votes | cotsc empty_samples |
-|-----|----------------------|----------|--------------------|---------------------|
-| 0   | false                | 0        | 15                 | 0                   |
-| 1   | true                 | 0        | 15                 | 0                   |
-| 2   | false                | 1        | 10                 | 3                   |
-| 3   | true                 | 0        | 10                 | 11                  |
-| 4   | false                | 1        | 11                 | 2                   |
+| row | idx  | react hit_step_limit | react em | cotsc winner_votes | cotsc empty_samples |
+|-----|------|----------------------|----------|--------------------|---------------------|
+| 0   | 3687 | false                | 0        | 15                 | 0                   |
+| 1   | 6238 | true                 | 0        | 15                 | 0                   |
+| 2   | 5388 | false                | 1        | 10                 | 3                   |
+| 3   | 3522 | true                 | 0        | 10                 | 11                  |
+| 4   | 3824 | false                | 1        | 11                 | 2                   |
 
-idx 0 is the row that separates `hit_step_limit` from `em` (a finished-but-wrong ReAct
-answer); idx 2 and 3 sit exactly ON the threshold (10 < 10.5, so both back off); idx 4
-sits one vote above it; and idx 3's 11 empty samples make its 10 votes a *unanimous*
+Row 0 is the one that separates `hit_step_limit` from `em` (a finished-but-wrong ReAct
+answer); rows 2 and 3 sit exactly ON the threshold (10 < 10.5, so both back off); row 4
+sits one vote above it; and row 3's 11 empty samples make its 10 votes a *unanimous*
 10-of-10 among the samples that parsed — which still backs off, because the
 denominator is the paper's n = 21 and never the non-empty count (D13).
+
+Rule 12 governs the two files' LAYOUT as much as their fields:
+
+* `idx` holds the real first five evaluation indices, so the react file is in evaluation
+  order and NOT in ascending-idx order. A `_combine` that sorted its output by idx would
+  return the rows in a different order and is separated here.
+* the cotsc file lists the same five rows in ascending-idx order, i.e. a DIFFERENT order
+  from the react file, so a `_combine` that zipped the two files positionally instead of
+  joining on `idx` mis-joins every row and trips the gold assertion.
+* the cotsc `cost` column is five distinct values (sum 0.0083, max 0.0023, mean 0.00166,
+  first 0.0019, last 0.0013), because the combination rows are all 0.0 by construction
+  and an all-zero column cannot tell `total_cost` = sum from max / mean / first / last.
 """
 
 import csv
@@ -37,6 +49,8 @@ from src import baselines, combine, llm
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 REACT = FIXTURES / "combine_react.jsonl"
 COTSC = FIXTURES / "combine_cotsc.jsonl"
+# The five rows' idx, in the react file's (= evaluation) order; row n is IDX[n].
+IDX = [3687, 6238, 5388, 3522, 3824]
 
 
 @pytest.fixture(autouse=True)
@@ -82,16 +96,16 @@ def test_exactly_ten_votes_falls_back_and_eleven_does_not(tmp_path):
     A `n // 2` threshold (10) keeps CoT-SC on the 10-vote rows and fails here."""
     lines = run("cotsc_to_react", tmp_path)
     votes = {l["idx"]: l for l in combine.read_jsonl(COTSC)}
-    assert votes[2]["winner_votes"] == 10 and lines[2]["source"] == "react"
-    assert votes[3]["winner_votes"] == 10 and lines[3]["source"] == "react"
-    assert votes[4]["winner_votes"] == 11 and lines[4]["source"] == "cotsc"
+    assert votes[IDX[2]]["winner_votes"] == 10 and lines[2]["source"] == "react"
+    assert votes[IDX[3]]["winner_votes"] == 10 and lines[3]["source"] == "react"
+    assert votes[IDX[4]]["winner_votes"] == 11 and lines[4]["source"] == "cotsc"
     assert combine.N_SAMPLES / 2 == 10.5
 
 
 def test_the_denominator_is_21_and_never_the_non_empty_sample_count(tmp_path):
     """idx 3: 10 votes out of 10 samples that parsed, 11 that did not. Unanimous among
     the valid ones — and still a back-off, because n is 21 (D13)."""
-    cotsc = {l["idx"]: l for l in combine.read_jsonl(COTSC)}[3]
+    cotsc = {l["idx"]: l for l in combine.read_jsonl(COTSC)}[IDX[3]]
     assert (cotsc["winner_votes"], cotsc["empty_samples"]) == (10, 11)
     n_valid = combine.N_SAMPLES - cotsc["empty_samples"]
     assert cotsc["winner_votes"] > n_valid / 2  # an n_valid denominator keeps CoT-SC
@@ -138,12 +152,22 @@ def test_each_line_inherits_steps_limit_and_trajectory_from_its_source(tmp_path)
 
 
 def test_no_combination_line_is_charged_for_anything(tmp_path):
+    path = tmp_path / "results.csv"
+    path.touch()  # exists, size 0: an editor truncation, or a killed write (H-2's shape)
     for rule in ("react_to_cotsc", "cotsc_to_react"):
         lines = run(rule, tmp_path)
         assert [l["cost"] for l in lines] == [0.0] * 5
-        row = combine.write_results_row("hotpotqa", rule, "gpt-4o-mini", lines,
-                                        path=tmp_path / "results.csv")
+        row = combine.write_results_row("hotpotqa", rule, "gpt-4o-mini", lines, path=path)
         assert row[-1] == 0.0
+    # results.csv is APPENDED to across runs, so the header is written exactly once, and
+    # written even though the file already existed: `write_header = True` repeats it
+    # between the two rows and `not path.exists()` omits it from a touched file, and
+    # either leaves every later DictReader of results.csv reading garbage.
+    written = path.read_text().splitlines()
+    assert written[0] == ",".join(combine.RESULTS_HEADER)
+    assert len(written) == 3
+    assert written[1].startswith("hotpotqa,react_to_cotsc,")
+    assert written[2].startswith("hotpotqa,cotsc_to_react,")
 
 
 def test_a_mis_joined_pair_is_refused_rather_than_silently_combined(tmp_path):
@@ -184,3 +208,8 @@ def test_a_no_loop_condition_writes_empty_step_columns_not_zero(tmp_path):
     row = list(csv.DictReader(path.open()))[0]
     assert (row["mean_steps"], row["pct_hit_step_limit"]) == ("", "")
     assert row["metric"] == "0.4"  # D15: "" means not applicable, 0 would be a value
+    # rule 12: the only results row written over lines with DISTINCT, non-zero costs, so
+    # `total_cost` is the SUM (0.0083) and not max 0.0023, mean 0.00166, first 0.0019 or
+    # last 0.0013. Mean EM 0.4 and mean F1 0.63 also differ on these same five rows.
+    assert row["total_cost"] == "0.0083"
+    assert sum(l["f1"] for l in lines) / len(lines) == 0.63

@@ -314,6 +314,11 @@ def test_spend_is_the_sum_of_every_row_not_the_largest(monkeypatch, tmp_path):
 def test_the_ceiling_fires_on_the_call_that_would_cross_it(monkeypatch, tmp_path):
     fake = install(monkeypatch, tmp_path, FakeClient(usage=BIG), max_spend=0.25)
     llm.complete("p1", STOP)  # $0.15
+    # rule 12: the ceiling is INCLUSIVE — landing exactly on it is not crossing it. With
+    # $0.15 on the ledger this is the exact float the guard computes for the next call, so
+    # the boundary is pinned from both sides: `>=` in place of `>` refuses this one, and
+    # only a fixture that sits ON the ceiling can tell the two operators apart.
+    monkeypatch.setattr(llm, "MAX_SPEND_USD", 0.15 + llm._estimate(len("p2"), 100))
     llm.complete("p2", STOP)  # $0.30 total — the ceiling is now behind us
     with pytest.raises(llm.BudgetExceeded, match=r"spent \$0.3000"):
         llm.complete("p3", STOP)
@@ -379,12 +384,18 @@ def test_check_budget_for_batch_is_preflight_only(monkeypatch, tmp_path, capsys)
     fake = install(monkeypatch, tmp_path, FakeClient(usage=BIG), max_spend=0.50)
     llm.complete("p", STOP)  # $0.15 on the ledger, read back off calls.csv
 
+    # rule 12: the ceiling is set to the exact float this batch estimates to, so the batch
+    # lands ON it and still FITS. A `<` in place of `<=` refuses a run that exactly fits,
+    # and no fixture with headroom to spare can separate the two.
+    estimate = 6 * llm._estimate(6000, 100)
+    monkeypatch.setattr(llm, "MAX_SPEND_USD", 0.15 + estimate)
     assert llm.check_budget_for_batch(3, 2, 6000) is True
     line = capsys.readouterr().out.strip()
     assert "\n" not in line  # ONE line
-    assert "6 calls" in line and "spent $0.1500" in line and "of $0.50" in line
-    assert f"est ${6 * llm._estimate(6000, 100):.4f}" in line  # the gate's own formula
-    assert "headroom $0.3500" in line and line.endswith("FITS")
+    assert "6 calls" in line and "spent $0.1500" in line
+    assert f"of ${0.15 + estimate:.2f}" in line
+    assert f"est ${estimate:.4f}" in line  # the gate's own formula
+    assert f"headroom ${estimate:.4f}" in line and line.endswith("FITS")
 
     assert llm.check_budget_for_batch(500, 7, 6000) is False
     assert "DOES NOT FIT" in capsys.readouterr().out
