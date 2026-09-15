@@ -4,12 +4,14 @@ Run the prompts in order. Tick a box only when that step's tests pass.
 Commit after every step. Tag `v1-reproduced` after step 08 comes back clean.
 
 ## Setup
-- [ ] `./setup.sh` runs clean (prints "first 5 eval indices: [3687, 6238, 5388, 3522, 3824] OK")
-- [ ] `.env` filled in with MODEL and an API key
-- [ ] `git init && git add . && git commit -m "scaffold"`
+- [x] `./setup.sh` runs clean (prints "first 5 eval indices: [3687, 6238, 5388, 3522, 3824] OK")
+- [~] `.env` — MODEL=gpt-4o-mini set; OPENAI_API_KEY still empty (owner to fill)
+- [x] `git init && git add . && git commit -m "scaffold"`
 
 ## Phase 1 — reproduce the prompting results
-- [ ] 01 summarize        -> paper/notes.md exists and matches tests/EXPECTED.md
+- [x] 01 summarize        -> paper/notes.md exists and matches tests/EXPECTED.md
+      (3 disagreements FLAGGED, not amended: L44 partially untestable here,
+       L45 misquotes paper 3.3, L46 is a paraphrase. See notes.md.)
 - [ ] 02 environment      -> tests/test_wiki_env.py passes
 - [ ] 03 data + metrics   -> eval indices and EM tests pass
 - [ ] 04 llm client       -> cache test passes, results/calls.csv appears
