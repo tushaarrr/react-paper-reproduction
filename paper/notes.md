@@ -60,6 +60,64 @@ Two spelling notes against the source, neither behavioural: the retry call's sto
 `hotpotqa.ipynb:21` really is `stop=["\n"]`); and the scratchpad append is two statements in the reference,
 `step_str = f"..."` (`hotpotqa.ipynb:104`, `FEVER.ipynb:97`) then `prompt += step_str` (`:105` / `:98`).
 
+### Whitespace parity in the scratchpad (verified against the first live call)
+
+**`.strip()` runs once, on the WHOLE completion, and neither the thought nor the action is ever stripped individually.**
+`hotpotqa.ipynb:95` is `thought, action = thought_action.strip().split(f"\nAction {i}: ")` — one strip, and a literal
+separator that **includes the trailing space**. The only other strip in the loop is `:101`, on the *retry* call's return.
+Nothing tidies the halves afterwards, and `:104` interpolates them as they are.
+
+This is not cosmetic: the scratchpad **is** the next step's prompt (`:105`), so any whitespace we tidy changes what the model
+sees at every later step of the episode, and diverges from the reference on the byte level.
+
+Verified against this repo's first live call, whose raw completion was, byte for byte (Python repr, so the trailing spaces
+are visible — a fenced block cannot show them):
+
+```python
+raw = ('I need to search for Irene Jacob and find out what movie she completed before the American action crime '
+       'thriller film directed by Stuart Bird. \nAction 1: Search[Irene Jacob] ')
+```
+
+Replaying `:93-104` on it gives, all three verified:
+
+* `thought == 'I need to search ... directed by Stuart Bird. '` — **keeps** its trailing space (the whole-string strip only
+  touched the two ends of the completion, and this space is interior to it).
+* `action == 'Search[Irene Jacob]'` — **loses** its trailing space, because that one *was* at the end of the completion.
+* the step's scratchpad block is:
+
+```python
+block = ('Thought 1: I need to search for Irene Jacob and find out what movie she completed before the American action '
+         'crime thriller film directed by Stuart Bird. \nAction 1: Search[Irene Jacob]\nObservation 1: <obs>\n')
+```
+
+The space after `Bird.` travels into step 2's prompt. **Rule: do not tidy whitespace anywhere in the scratchpad, and never
+strip `thought` or `action` individually anywhere in the pipeline.** Pinned by the parity test in
+`tests/test_graph_react.py`, which feeds that exact raw string and asserts that exact block; two of the step-05 mutations
+(strip the thought individually; split on `"\nAction {i}:"` without the trailing space) are killed by it alone — the second
+one also hands the env `' Search[Irene Jacob]'`, which `wikienv.py:127` strips back to `Search[...]`, whose **capital** `S`
+then fails the lowercase prefix test at `:132` and scores `Invalid action:`.
+
+**Two consequences of the same literalism, worth stating because both look like bugs:**
+
+* The observation's own trailing newline is **not** absorbed. `:104` appends `f"...Observation {i}: {obs}\n"` to an `obs`
+  that, for `finish[...]`, already ends with `\n` — so a normally finishing trajectory ends with
+  `Episode finished, reward = 0\n\n`, i.e. the §2 literal **plus** the step separator. Byte-equality assertions (C1(f),
+  C4(a)) must expect both newlines.
+* **The thought is not a state field; the action is.** `think_act` appends
+  `f"Thought {i}: {thought}\nAction {i}: {action}"` to the scratchpad, and its concatenation with `execute`'s
+  `f"\nObservation {i}: {obs}\n"` is byte-identical to the reference's single `step_str`, which is what the parity test
+  checks. The action *also* travels in the state, as the 11th field `action` of `05-react-graph.md:3` (a plain `str`, so
+  unlike the env of D21 it costs checkpointing nothing). **`execute` must never recover it from the scratchpad.** An
+  earlier version of this section justified `rsplit(f"Action {i}: ", 1)[-1]` with "the real action is always the last";
+  that is false, and the correction is logged as CLAUDE.md corrections-log entry 8. `rsplit` truncates an *action* whose
+  own text contains the label — `Action 1: Search[Action 1: The Movie]` executes `the Movie]`, where the reference
+  executes `search[Action 1: The Movie]` — and `split` truncates on a *thought* that contains it, so neither direction is
+  safe. Two more reachable cases, both chat-model shapes: a retry that echoes the label it was prompted with
+  (`" Action 1: Search[X]"` → the reference executes `action 1: Search[X]` and scores `Invalid action:`, a re-parse
+  silently "repairs" it to `search[X]`), and the same shape in Act (D5/D17), which has no retry guard and no counter for
+  it. In every case the scratchpad stays byte-correct, so the parity test, `runs/` and `results/calls.csv` all look
+  normal while a different Wikipedia action was executed.
+
 **`step(env, action)` is not `env.step`.** `hotpotqa.ipynb:102` and `:111` (FEVER.ipynb:95, :104) call the notebook's retry
 helper defined at `hotpotqa.ipynb:46-52` / `FEVER.ipynb:46-52`:
 `while attempts < 10: try: return env.step(action) except requests.exceptions.Timeout: attempts += 1`.
@@ -90,14 +148,16 @@ explicit rule, or five of the seven `results/results.csv` condition rows are inv
 Combination lines additionally carry `source` ∈ {`"react"`, `"cotsc"`} per question, so the mix is auditable from `runs/`
 alone. This is what C9's "every number in `README.md` also appears in `results/results.csv`" guard checks against.
 
-**Graph state — the 10 fields of `05-react-graph.md:3`** (`question, task, scratchpad, step, done, answer, n_calls,
-n_badcalls, hit_step_limit, condition`), a `TypedDict`. **`step` initialises to 1**, and `execute` increments it *after*
+**Graph state — the 11 fields of `05-react-graph.md:3`** (`question, task, scratchpad, action, step, done, answer,
+n_calls, n_badcalls, hit_step_limit, condition`), a `TypedDict`. `action` carries the parsed action from `think_act` to
+`execute` (corrections-log entry 8 — re-deriving it from the scratchpad executes the wrong action while leaving the
+trajectory byte-correct). **`step` initialises to 1**, and `execute` increments it *after*
 appending the step to the scratchpad, so the router (`route_after_execute`, whose `step > 7` test replaces the state-writing
 conditional edge of `05-react-graph.md:9` — D22 below) sees `step == 8` after the 7th model step. Starting at 0 gives 8 model calls and a `Thought 0:` continuation prefix — silently,
 with no test failure unless C4(d) counts calls.
 
-**The env is not in the state — ownership and lifecycle (D21).** The state is exactly those 10 fields; a live `WikiEnv` is
-**not** an 11th one — a live object in the state breaks checkpointing and contradicts the declared schema. Instead:
+**The env is not in the state — ownership and lifecycle (D21).** The state is exactly those 11 fields; a live `WikiEnv` is
+**not** a twelfth one — a live object in the state breaks checkpointing and contradicts the declared schema. Instead:
 
 * `build_graph(condition, env)` returns a compiled graph whose `think_act`, `execute` and `force_finish` nodes **close over**
   `env`. The env reaches `execute` through that closure, never through the state.
@@ -746,7 +806,10 @@ concrete expected output**.
 | **C2** | Data loaders, eval-index sampler, SQuAD normalization, EM/F1, FEVER label check | `src/data.py` | `load_hotpotqa`, `load_fever`, `eval_indices`, `eval_indices_for`, `normalize_answer`, `exact_match`, `f1` | `tests/test_data.py` | §3.1 Domains; §3.3 (EM); normalization from `wrappers.py:42-78` | `eval_indices(7405)[:5] == [3687, 6238, 5388, 3522, 3824]`; `eval_indices_for("fever") == eval_indices(7405)` and `max(eval_indices_for("fever")) == 7390` (the FEVER sampler must never see `len(load_fever())`); `len(load_hotpotqa()) == 7405` and each item is a 3-tuple with `type in {"bridge","comparison"}`, `Counter(types) == {"bridge":5918,"comparison":1487}`; `len(load_fever()) == 9999`; `exact_match("The Chief of Protocol","chief of protocol") == 1`; `f1("Richard Milhous Nixon","Richard Nixon")` is a **float** strictly in (0,1) (`== 0.8`); `f1("yes","no") == 0.0` (yes/no short-circuit); FEVER `"supports."` vs gold `SUPPORTS` → 1; FEVER `"probably true"` → 0 |
 | **C3** | LLM client + cache + cost log + price table | `src/llm.py` | `complete(prompt, stop, temperature=0, max_tokens=100, n=1) -> list[str]`, `PRICES` | `tests/test_llm.py` | decoding params code-only (`hotpotqa.ipynb:23-30`); CoT-SC temp 0.7 / n=21 from §3.2 | a canned response `"I need to search X.\nAction 1: Search[X]\nObservation 1: leak"` with `stop=["\nObservation 1:"]` → returns exactly `"I need to search X.\nAction 1: Search[X]"` (stop excluded, cut at first occurrence); calling `complete` twice with identical args → second call makes **0** network calls and appends **0** rows to `results/calls.csv`; `complete(p, n=21, temperature=0.7)` → 21 cache entries whose keys differ only in `sample_index`, and 21 `calls.csv` rows on a cold cache, 0 on a warm one; **cache record shape (D14):** after that same canned call, the stored entry has `raw == "I need to search X.\nAction 1: Search[X]\nObservation 1: leak"` and `text == "I need to search X.\nAction 1: Search[X]"` — the `raw` field is exactly what `08-verify.md:10` prints as "a cached call where the raw output was cut", with no fresh network call; **cost (D16):** a stubbed response with `usage = {prompt_tokens: 1000, completion_tokens: 100}` on `gpt-4o-mini` → the appended `calls.csv` row has `cost_usd == 0.00021` (1000/1e6×0.15 + 100/1e6×0.60), and an unknown model name → `cost_usd == 0.0` plus one warning, no exception; **cache key (D28):** two calls identical in every argument but issued under a different `system_message` **miss** each other — 2 network calls, 2 `calls.csv` rows, 2 cache files — while a repeat under the same system message is served from cache |
 | **C3b** | Exemplar/prompt loader (CLAUDE.md rule 2 owner; `08-verify.md:9` byte-identity check) | `src/prompts.py` | `load_exemplars(task, condition)`, `build_prompt(task, condition, question, scratchpad, step)` | `tests/test_prompts.py` | §3.2 (exemplar counts); keys from `hotpotqa.ipynb:76`, `FEVER.ipynb:76` | all 8 required keys resolve and each returned string is **byte-equal** to the same key in `reference/prompts/`; loading `webthink_simple_3` or any other legacy key raises; `webthink_simple6` starts with `"\n"` and contains **0** `"\n\n"`; `webact_simple6` ends with `"\n\n"`; `webthink_simple3` ends with `"\n\n"`; `cotqa_simple3` contains the literal `Answer:REFUTES`; `cotqa_simple6` contains `"Thought: Let's think step by step. "` exactly 6 times and `cotqa_simple3` contains `"Let's think step by step"` exactly 0 times; `build_prompt("hotpotqa","react",...)` starts with the 521-char instruction header and `build_prompt("fever",*,...)` never does |
-| **C4** | ReAct graph: explicit LangGraph `StateGraph`, `think_act` → `execute` → pure router → `force_finish` / `END` / `think_act` (D22) | `src/graph_react.py` | `build_graph(condition, env)` (D21 — the env is a closure argument, never a state field), `think_act`, `execute`, **`force_finish`**, `route_after_execute` | `tests/test_graph_react.py` | §2 (alternation), §3.2 (ReAct prompting); loop from `hotpotqa.ipynb:85-115`; state from `05-react-graph.md:3` | fake-LLM + fake-env: **(0)** the initial state has the 10 fields of `05-react-graph.md:3` and `step == 1`, the first prompt ends `"Thought 1:"` (never `"Thought 0:"`), and a 7-step episode makes exactly **7** model steps with `step == 8` when `route_after_execute` runs (the pure router that replaces `05-react-graph.md:9`'s state-writing edge, D22). (a) scripted 2-step episode ends with `answer == "Richard Nixon"` and a scratchpad byte-equal to `"Thought 1: ...\nAction 1: Search[x]\nObservation 1: ...\nThought 2: ...\nAction 2: Finish[Richard Nixon]\nObservation 2: ...\n"`. (b) completion with **zero** `"\nAction 1: "` separators → `n_badcalls == 1`, `n_calls == 3` after two steps, second call used `stop=["\n"]`. (c) completion with **two** `"\nAction 1: "` separators (`"I need X.\nAction 1: Search[A]\nAction 1: Search[B]"`) → also `n_badcalls == 1` and a retry: the strict two-way unpack raises `ValueError: too many values to unpack`, and `split(sep, 1)` / `str.partition` would **not** retry and would execute `Search[A]\nAction 1: Search[B]`. (d) 7 non-finishing steps → the `force_finish` **node** ran, and the **final state** (not an intermediate one) has `hit_step_limit is True`, `answer == ""`, `done is True`; env received `finish[]`; `n_steps == 7`; `route_after_execute` returned `"force_finish"` and wrote nothing itself. **Trajectory end (D24):** the scratchpad ends exactly at `Observation 7: <obs>\n` — it contains **no** `Thought 8:`, `Action 8:` or `Observation 8:` line and does **not** end with `Episode finished, reward = 0\n`. A router that sets `hit_step_limit` instead of a node fails this row on langgraph 1.2.11 (the write is discarded). (e) LLM returns action `Search[Milhouse]` → env receives `search[Milhouse]` (first char only). (f) LLM returns `""` → env receives `""` → `Invalid action: `, episode continues (D9). Then 3 real HotpotQA trajectories eyeballed |
+| **C4** | ReAct graph: explicit LangGraph `StateGraph`, `think_act` → `execute` → pure router → `force_finish` / `END` / `think_act` (D22) | `src/graph_react.py` | `build_graph(condition, env)` (D21 — the env is a closure argument, never a state field), `think_act`, `execute`, **`force_finish`**, `route_after_execute` | `tests/test_graph_react.py` | §2 (alternation), §3.2 (ReAct prompting); loop from `hotpotqa.ipynb:85-115`; state from `05-react-graph.md:3` | fake-LLM + fake-env: **(0)** the initial state has the 11 fields of `05-react-graph.md:3` (including `action`, corrections-log entry 8: the
+action is carried from `think_act` to `execute` in the state and **never** recovered by re-splitting the scratchpad —
+`Action 1: Search[Action 1: The Movie]` must reach the env as `search[Action 1: The Movie]`, a label-echoing retry
+`" Action 1: Search[X]"` as `action 1: Search[X]`) and `step == 1`, the first prompt ends `"Thought 1:"` (never `"Thought 0:"`), and a 7-step episode makes exactly **7** model steps with `step == 8` when `route_after_execute` runs (the pure router that replaces `05-react-graph.md:9`'s state-writing edge, D22). (a) scripted 2-step episode ends with `answer == "Richard Nixon"` and a scratchpad byte-equal to `"Thought 1: ...\nAction 1: Search[x]\nObservation 1: ...\nThought 2: ...\nAction 2: Finish[Richard Nixon]\nObservation 2: ...\n"`. (b) completion with **zero** `"\nAction 1: "` separators → `n_badcalls == 1`, `n_calls == 3` after two steps, second call used `stop=["\n"]`. (c) completion with **two** `"\nAction 1: "` separators (`"I need X.\nAction 1: Search[A]\nAction 1: Search[B]"`) → also `n_badcalls == 1` and a retry: the strict two-way unpack raises `ValueError: too many values to unpack`, and `split(sep, 1)` / `str.partition` would **not** retry and would execute `Search[A]\nAction 1: Search[B]`. (d) 7 non-finishing steps → the `force_finish` **node** ran, and the **final state** (not an intermediate one) has `hit_step_limit is True`, `answer == ""`, `done is True`; env received `finish[]`; `n_steps == 7`; `route_after_execute` returned `"force_finish"` and wrote nothing itself. **Trajectory end (D24):** the scratchpad ends exactly at `Observation 7: <obs>\n` — it contains **no** `Thought 8:`, `Action 8:` or `Observation 8:` line and does **not** end with `Episode finished, reward = 0\n`. A router that sets `hit_step_limit` instead of a node fails this row on langgraph 1.2.11 (the write is discarded). (e) LLM returns action `Search[Milhouse]` → env receives `search[Milhouse]` (first char only). (f) LLM returns `""` → env receives `""` → `Invalid action: `, episode continues (D9). Then 3 real HotpotQA trajectories eyeballed |
 | **C5** | Act variant | `src/graph_react.py` | `build_graph(condition="act", env=...)` (same D21/D22 shape, including `force_finish`) | `tests/test_graph_act.py` | §3.2 Baselines (c); spec **D5** | fake-LLM: the continuation is exactly `f"Action {i}:"`, `stop == [f"\nObservation {i}:"]`; the scratchpad contains **zero** occurrences of `"Thought"`; each step serializes as `f"Action {i}: {action}\nObservation {i}: {obs}\n"`; a malformed completion triggers **no** retry — Act has no parse-retry path — but it **does** count bad calls, so `n_badcalls == 0` is **not** asserted unconditionally (D17); **multi-action completion:** `"Search[A]\nAction 2: Search[B]"` → the env receives exactly `search[A]` (first line only) and `n_badcalls == 0`; a completion whose first line is empty or carries no `[` → the env receives that first line and `n_badcalls == 1`; the same scripted episode resolves to the same answer as C4(a); HotpotQA Act prompt starts with the instruction header and has **no** blank line before the first `Question:`, FEVER Act prompt starts with `\nDetermine if there is Observation that SUPPORTS` |
 | **C6** | Standard, CoT, CoT-SC | `src/baselines.py` | `standard`, `cot`, `cot_sc`, `parse_answer`, `majority_vote` | `tests/test_baselines.py` | §3.2 Baselines (a)(b) + CoT-SC; specs **D2/D3/D4** | `parse_answer` replays all 6 HotpotQA and all 3 FEVER exemplar tails as fake completions and recovers the gold answer each time, **including** `"Answer:REFUTES"` → `"REFUTES"` (splitting on `"Answer: "` fails this); `parse_answer("Thought: ...\nAnswer: yes\nQuestion: next")` → `"yes"` (text after the **last** `Answer:`, stripped); a completion with no `Answer:` → `""` and a bad-call count of 1; `majority_vote` on a canned 21-sample list with 12× `"Richard Nixon"` → `("Richard Nixon", 12, 21)` (winner, `votes`, `n_valid`); on a 10/10/1 tie the winner is the answer whose first occurrence has the lowest sample index, identical across 100 repeated calls; **empty samples (D13):** 11× `""` + 10× `"Richard Nixon"` → `("Richard Nixon", 10, 10)` — `""` never wins — and `cotsc_to_react` on that row picks the **ReAct** prediction because `10 <= 10`; all 21 empty → `("", 0, 0)`, `em == 0`; **raw-string rule (D4):** `["Richard Nixon.", "richard nixon", "Richard Nixon."]` → the recorded `prediction` is `"Richard Nixon."`, the raw string of the winning key's **lowest** sample index; prompt-shape asserts: HotpotQA Standard prompt ends `"\nQuestion: <q>\nAnswer:"` **and carries no instruction header**, **HotpotQA CoT prompt likewise carries no instruction header and ends `"\nQuestion: <q>\nThought:"` (D1)**, FEVER CoT prompt ends `"\n\nClaim: <c>\nThought:"` |
 | **C7** | The two combination rules | `src/combine.py` | `react_to_cotsc`, `cotsc_to_react`, `write_results_row` | `tests/test_combine.py` | §3.2 "Combining Internal and External Knowledge" A and B; spec **D6** | named fixture pair `tests/fixtures/combine_react.jsonl` / `tests/fixtures/combine_cotsc.jsonl`, 5 rows each, joined on `idx` — idx 0 (`hit_step_limit false`, `votes 15`), 1 (`true`, `15`), 2 (`false`, `10`), 3 (`true`, `10`), 4 (`false`, `11`), ReAct predictions `R0..R4`, CoT-SC predictions `S0..S4`. Expected picks, literally: `react_to_cotsc` → `[R0, S1, R2, S3, R4]` with `source` `[react, cotsc, react, cotsc, react]`; `cotsc_to_react` → `[S0, S1, R2, R3, S4]` with `source` `[cotsc, cotsc, react, react, cotsc]`. Each output line also inherits `n_steps` / `hit_step_limit` from the source it picked (D15). Neither function issues an LLM call (`calls.csv` row count unchanged), and `total_cost == 0.0` |
@@ -1120,6 +1183,13 @@ Stub. Defined in **the first row of the "Deliberate deviations we add" table**, 
 `04-llm-client.md:4` lists, because every request carries the system message too and rule 5 says "keyed by the exact input".
 Without it, editing the system message silently serves the whole run from stale completions. C3 asserts that changing the
 system message **misses** the cache.
+
+**Numeric fields are normalised before hashing**, added with corrections-log entry 9: `_key` stores
+`float(temperature)` and `int(max_tokens)`, because `json.dumps` spells `0` as `"0"` and `0.0` as `"0.0"` and the two
+therefore hashed to different sha256s. `src/graph_react.py` passes `temperature=0` while `complete`'s own default (and the
+entry already sitting in `data/cache/llm/`) is `0.0`, so every ReAct and Act call of a rerun would have missed the cache,
+re-issued and re-billed while returning identical text. C3 asserts that the two spellings share one cache path and cost one
+request.
 
 ### Disagreements with the locked decisions
 

@@ -1,6 +1,6 @@
 Implement src/graph_react.py as a LangGraph StateGraph.
 
-State (TypedDict): question, task, scratchpad (the growing Thought/Action/Observation text), step, done, answer, n_calls, n_badcalls, hit_step_limit, condition ("react" or "act").
+State (TypedDict): question, task, scratchpad (the growing Thought/Action/Observation text), action (the action string think_act parsed, handed to execute as-is), step, done, answer, n_calls, n_badcalls, hit_step_limit, condition ("react" or "act"). `action` is a field because the reference keeps the action in a local variable for the rest of one loop iteration and our two-node split is the only reason it has to travel: recovering it in `execute` by re-splitting the scratchpad on `f"Action {step}: "` silently truncates any action or thought whose own text contains that label (`Search[Action 1: The Movie]` -> `the Movie]`), and the scratchpad stays byte-correct, so the trajectory in `runs/` looks perfect while a different Wikipedia action was executed.
 
 Nodes:
 - think_act: build prompt = instruction + exemplars + question + scratchpad + f"Thought {step}:" (for condition "act", use the Act-only exemplars and prompt f"Action {step}:" with no thought). Call llm.complete with stop=[f"\nObservation {step}:"]. Parse thought and action by splitting on f"\nAction {step}: ". If the split fails, count a bad call, keep the first line as the thought, and call the LLM again with the thought appended and stop=["\n"] to get just the action, exactly as the reference does.

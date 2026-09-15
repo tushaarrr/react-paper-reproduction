@@ -131,8 +131,11 @@ def _key(prompt, stop, temperature, max_tokens, sample_index):
         "system_message": SYSTEM_MESSAGE,
         "prompt": prompt,
         "stop": list(stop),
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        # Normalised: json.dumps spells int 0 "0" and float 0.0 "0.0", so a caller
+        # writing temperature=0 would miss every entry a temperature=0.0 caller wrote
+        # and re-pay for the whole run (CLAUDE.md rule 5).
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
         "sample_index": sample_index,
     }
 
@@ -223,16 +226,44 @@ def _spend_so_far():
         return sum(float(row["cost_usd"]) for row in csv.DictReader(f))
 
 
-def _check_budget(prompt, max_tokens):
+def _estimate(prompt_chars, max_tokens):
+    """The pre-call estimate: len/4 characters-per-token on the input side (system
+    message included) and the full max_tokens on the output side, its hard ceiling.
+    Shared with check_budget_for_batch so the pre-flight and the gate cannot drift."""
     if MODEL not in PRICES:
         raise BudgetExceeded(
             f"no price for {MODEL}; add it to PRICES in src/llm.py "
             f"((0.0, 0.0) for a locally served model)"
         )
-    spent = _spend_so_far()
     in_rate, out_rate = PRICES[MODEL]
-    estimate = (len(SYSTEM_MESSAGE) + len(prompt)) / 4 / 1e6 * in_rate
-    estimate += max_tokens / 1e6 * out_rate
+    return (len(SYSTEM_MESSAGE) + prompt_chars) / 4 / 1e6 * in_rate + max_tokens / 1e6 * out_rate
+
+
+def check_budget_for_batch(n_questions, calls_per_question, prompt_chars, max_tokens=100):
+    """Pre-flight for CLAUDE.md rule 8: one printed line, and NO request of any kind.
+
+    Run it before a batch — it is what authorises (or refuses) a live run. `prompt_chars`
+    is the expected prompt size per call; for react/act that is the prefix (instruction +
+    exemplars + question, ~6 KB on HotpotQA) plus the scratchpad, so pass the size of the
+    LAST step, not the first, or a 7-step episode is under-estimated.
+    """
+    calls = n_questions * calls_per_question
+    estimate = calls * _estimate(prompt_chars, max_tokens)
+    spent = _spend_so_far()
+    fits = spent + estimate <= MAX_SPEND_USD
+    print(
+        f"budget: {n_questions} questions x {calls_per_question} calls = {calls} calls "
+        f"on {MODEL} at ~{prompt_chars} prompt chars -> est ${estimate:.4f}; "
+        f"spent ${spent:.4f} of ${MAX_SPEND_USD:.2f}; "
+        f"headroom ${MAX_SPEND_USD - spent:.4f}; "
+        f"{'FITS' if fits else 'DOES NOT FIT — do not launch'}"
+    )
+    return fits
+
+
+def _check_budget(prompt, max_tokens):
+    estimate = _estimate(len(prompt), max_tokens)
+    spent = _spend_so_far()
     if spent + estimate > MAX_SPEND_USD:
         raise BudgetExceeded(
             f"spent ${spent:.4f} so far, ceiling MAX_SPEND_USD=${MAX_SPEND_USD:.2f} "

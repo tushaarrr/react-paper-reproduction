@@ -75,6 +75,22 @@ Defects found in this project's OWN files and fixed at source. Newest last.
    (~$66.50 for 14,000 calls) against a ledger reading $0.00. Corrected to a refusal
    before the first call; the deliberately-free phase-3 models get explicit `0.0 / 0.0`
    rows instead, so free is stated rather than assumed.
+8. `prompts/claude-code/05-react-graph.md` — its 10-field state has no `action`, so `execute`
+   had to recover the action by re-splitting the scratchpad tail (`rsplit(f"Action {i}: ", 1)`).
+   That is not what the reference does (it holds the action in a local for the rest of the loop
+   iteration) and it is wrong in both directions: `rsplit` truncates an action whose own text
+   contains `Action {i}: ` (`Search[Action 1: The Movie]` → `the Movie]`), `split` truncates on a
+   thought that does, and a chat model echoing the retry prompt's own `Action 1:` label gets
+   silently "repaired" instead of scoring the `Invalid action:` the reference scores. The
+   scratchpad is byte-correct either way, so `runs/` records nothing unusual while a different
+   Wikipedia action was executed. State gains an 11th field, `action` (a plain `str` — unlike the
+   env of D21, so checkpointing is unaffected). Corrected at source in the prompt file, recorded
+   in `paper/notes.md` section 1, and pinned by `tests/test_graph_react.py`.
+9. `src/llm.py` — `_key` json-dumped the raw `temperature` and `max_tokens`, so `0` and `0.0`
+   hashed to different sha256s and a caller spelling temperature `0` (as `src/graph_react.py`
+   does) missed every entry a `0.0` caller wrote — including the one already in
+   `data/cache/llm/`. Rule 5's cache would have re-issued and re-billed a whole rerun while
+   producing identical text. `_key` now normalises: `float(temperature)`, `int(max_tokens)`.
 
 ### Rule 10
 

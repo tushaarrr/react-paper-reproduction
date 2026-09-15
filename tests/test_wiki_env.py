@@ -115,6 +115,20 @@ def test_search_hit_returns_five_sentences(env, monkeypatch):
     assert (done, info["answer"], info["steps"]) == (False, None, 1)
 
 
+def test_action_with_a_trailing_space_still_dispatches(env, monkeypatch):
+    """wiki_env.py:135's `action.strip()` is load-bearing and nothing else pins it.
+
+    A model's trailing space reaches the env for real: Act takes the first line of the
+    completion (D5/D17), and `"search[X] \\nAction 2: ..."` has one. Without the strip
+    the `endswith("]")` test fails and the step silently becomes `Invalid action:`.
+    """
+    serve(monkeypatch, {HIT_URL: fixture("colorado_orogeny_hit.html")})
+    obs, done, info = env.step("search[Colorado orogeny] ")
+    assert obs == HIT_OBS
+    assert not obs.startswith("Invalid action")
+    assert (done, info["steps"]) == (False, 1)
+
+
 def test_lookup_counts(searched):
     """(b)"""
     assert searched.step("lookup[New Mexico]")[0] == RESULT1

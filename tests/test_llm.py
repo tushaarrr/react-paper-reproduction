@@ -196,6 +196,21 @@ def test_temperature_is_part_of_the_key(monkeypatch, tmp_path):
     assert len(fake.calls) == 2 and len(records()) == 2
 
 
+def test_int_and_float_spellings_of_a_number_share_one_cache_entry(monkeypatch, tmp_path):
+    """Corrections-log entry 9. `src/graph_react.py` spells them `temperature=0` and
+    `max_tokens=100` (ints) while `complete`'s own default — and every entry already in
+    `data/cache/llm/` — is the float `0.0`. `json.dumps` writes "0" and "0.0", so an
+    un-normalised key hashed the two to different sha256s: identical text, a full cache
+    miss, and rule 5's "reruns never hit the network" quietly false for a whole run."""
+    fake = install(monkeypatch, tmp_path)
+    assert llm._cache_path(llm._key("p", STOP, 0, 100, 0)) == llm._cache_path(
+        llm._key("p", STOP, 0.0, 100.0, 0)
+    )
+    llm.complete("p", STOP, temperature=0.0, max_tokens=100)
+    llm.complete("p", STOP, temperature=0, max_tokens=100)
+    assert len(fake.calls) == 1 and len(records()) == 1 and len(rows()) == 1
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [{"prompt": "other"}, {"stop": ["\n"]}, {"max_tokens": 50}, {"temperature": 0.7}],
@@ -357,6 +372,23 @@ def test_budget_total_survives_a_process_restart(monkeypatch, tmp_path):
         llm.complete("a different prompt", STOP)
     assert "spent $3.0000" in str(excinfo.value)  # read back off disk, not from RAM
     assert fake.calls == [] and len(rows()) == 1
+
+
+def test_check_budget_for_batch_is_preflight_only(monkeypatch, tmp_path, capsys):
+    """The pre-flight the operator runs before a live batch: one line, zero requests."""
+    fake = install(monkeypatch, tmp_path, FakeClient(usage=BIG), max_spend=0.50)
+    llm.complete("p", STOP)  # $0.15 on the ledger, read back off calls.csv
+
+    assert llm.check_budget_for_batch(3, 2, 6000) is True
+    line = capsys.readouterr().out.strip()
+    assert "\n" not in line  # ONE line
+    assert "6 calls" in line and "spent $0.1500" in line and "of $0.50" in line
+    assert f"est ${6 * llm._estimate(6000, 100):.4f}" in line  # the gate's own formula
+    assert "headroom $0.3500" in line and line.endswith("FITS")
+
+    assert llm.check_budget_for_batch(500, 7, 6000) is False
+    assert "DOES NOT FIT" in capsys.readouterr().out
+    assert len(fake.calls) == 1 and len(rows()) == 1  # neither call issued anything
 
 
 # -- retries ---------------------------------------------------------------
