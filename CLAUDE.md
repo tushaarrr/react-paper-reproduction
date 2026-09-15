@@ -91,6 +91,24 @@ Defects found in this project's OWN files and fixed at source. Newest last.
    does) missed every entry a `0.0` caller wrote — including the one already in
    `data/cache/llm/`. Rule 5's cache would have re-issued and re-billed a whole rerun while
    producing identical text. `_key` now normalises: `float(temperature)`, `int(max_tokens)`.
+10. `paper/notes.md` — D3's parse bullet and the C6 row specified the answer as the text after the
+    **LAST** `Answer:` in the completion. Wrong whenever the stop list fails: the completion then
+    runs on into `Question: <next>\nThought: ...\nAnswer: <other>` and LAST returns a *different
+    question's* answer, scoring it against this question's gold — a silent, plausible-looking
+    wrong answer in `runs/`. Corrected to the FIRST occurrence (D37), with D3 retracted by name
+    rather than overwritten, and C6's worked example fixed (it also assumed a first-line cut that
+    no split-and-strip rule performs). Pinned by `tests/test_baselines.py`.
+11. `paper/notes.md` (D41) — the decision cites question 5388, prediction `torpedo boats and
+    submarines` against gold `torpedoes`, as "EM 0, F1 > 0". Measured: **F1 is 0.0**, because
+    SQuAD normalization does not stem, so `torpedo` and `torpedoes` share no token. The decision
+    (log EM and F1 everywhere) stands; the example does not, and a reader checking the claim would
+    have concluded the F1 column was broken. Corrected in place with a pair from the same question
+    that does show the gap — `torpedoes and submarines` → EM 0, F1 0.5 — and both pairs are pinned
+    in `tests/test_run.py`.
+12. `tests/test_llm.py` — asserted `llm.MAX_SPEND_USD == 5.00` after reloading the module, which
+    re-reads `.env`. D42 raised the ceiling there to 20.00, so four parametrised cases failed on a
+    change that was authorised and correct. The assertion now pins the invariant the module
+    actually enforces (finite and non-negative), not the operator's current number.
 
 ### Rule 10
 
@@ -113,3 +131,17 @@ When a test asserts two related counters (n_calls and n_badcalls, requests and r
 and cache entries), construct the scenario so the two numbers DIFFER, and use at least three
 of the thing being counted. Asserting 1 == 1 cannot distinguish "incremented on parse failure"
 from "incremented on every call".
+
+### Rule 13 — the test suite can never spend money
+
+`tests/conftest.py` severs the real LLM client for every test by default. A test that
+forgets to patch `llm.complete` / `llm._request` ERRORS instead of silently billing.
+Opt in explicitly: `@pytest.mark.slow` for a live smoke test (deselected by default),
+`@pytest.mark.builds_client` for a test that constructs a client to inspect its payload
+and sends nothing.
+
+**Why:** on 2026-09-15 a test written against a FACTORY fixture (`fake`) as though it
+were the fake instance left `llm.complete` unpatched, and `cot_sc` issued 42 unauthorised
+live calls ($0.003318) across two parametrised cases. The per-test discipline was correct
+but easy to get subtly wrong; the suite-wide block makes the failure loud instead.
+

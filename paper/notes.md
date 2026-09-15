@@ -811,7 +811,7 @@ action is carried from `think_act` to `execute` in the state and **never** recov
 `Action 1: Search[Action 1: The Movie]` must reach the env as `search[Action 1: The Movie]`, a label-echoing retry
 `" Action 1: Search[X]"` as `action 1: Search[X]`) and `step == 1`, the first prompt ends `"Thought 1:"` (never `"Thought 0:"`), and a 7-step episode makes exactly **7** model steps with `step == 8` when `route_after_execute` runs (the pure router that replaces `05-react-graph.md:9`'s state-writing edge, D22). (a) scripted 2-step episode ends with `answer == "Richard Nixon"` and a scratchpad byte-equal to `"Thought 1: ...\nAction 1: Search[x]\nObservation 1: ...\nThought 2: ...\nAction 2: Finish[Richard Nixon]\nObservation 2: ...\n"`. (b) completion with **zero** `"\nAction 1: "` separators → `n_badcalls == 1`, `n_calls == 3` after two steps, second call used `stop=["\n"]`. (c) completion with **two** `"\nAction 1: "` separators (`"I need X.\nAction 1: Search[A]\nAction 1: Search[B]"`) → also `n_badcalls == 1` and a retry: the strict two-way unpack raises `ValueError: too many values to unpack`, and `split(sep, 1)` / `str.partition` would **not** retry and would execute `Search[A]\nAction 1: Search[B]`. (d) 7 non-finishing steps → the `force_finish` **node** ran, and the **final state** (not an intermediate one) has `hit_step_limit is True`, `answer == ""`, `done is True`; env received `finish[]`; `n_steps == 7`; `route_after_execute` returned `"force_finish"` and wrote nothing itself. **Trajectory end (D24):** the scratchpad ends exactly at `Observation 7: <obs>\n` — it contains **no** `Thought 8:`, `Action 8:` or `Observation 8:` line and does **not** end with `Episode finished, reward = 0\n`. A router that sets `hit_step_limit` instead of a node fails this row on langgraph 1.2.11 (the write is discarded). (e) LLM returns action `Search[Milhouse]` → env receives `search[Milhouse]` (first char only). (f) LLM returns `""` → env receives `""` → `Invalid action: `, episode continues (D9). Then 3 real HotpotQA trajectories eyeballed |
 | **C5** | Act variant | `src/graph_react.py` | `build_graph(condition="act", env=...)` (same D21/D22 shape, including `force_finish`) | `tests/test_graph_act.py` | §3.2 Baselines (c); spec **D5** | fake-LLM: the continuation is exactly `f"Action {i}:"`, `stop == [f"\nObservation {i}:"]`; the scratchpad contains **zero** occurrences of `"Thought"`; each step serializes as `f"Action {i}: {action}\nObservation {i}: {obs}\n"`; a malformed completion triggers **no** retry — Act has no parse-retry path — but it **does** count bad calls, so `n_badcalls == 0` is **not** asserted unconditionally (D17); **multi-action completion:** `"Search[A]\nAction 2: Search[B]"` → the env receives exactly `search[A]` (first line only) and `n_badcalls == 0`; a completion whose first line is empty or carries no `[` → the env receives that first line and `n_badcalls == 1`; the same scripted episode resolves to the same answer as C4(a); HotpotQA Act prompt starts with the instruction header and has **no** blank line before the first `Question:`, FEVER Act prompt starts with `\nDetermine if there is Observation that SUPPORTS` |
-| **C6** | Standard, CoT, CoT-SC | `src/baselines.py` | `standard`, `cot`, `cot_sc`, `parse_answer`, `majority_vote` | `tests/test_baselines.py` | §3.2 Baselines (a)(b) + CoT-SC; specs **D2/D3/D4** | `parse_answer` replays all 6 HotpotQA and all 3 FEVER exemplar tails as fake completions and recovers the gold answer each time, **including** `"Answer:REFUTES"` → `"REFUTES"` (splitting on `"Answer: "` fails this); `parse_answer("Thought: ...\nAnswer: yes\nQuestion: next")` → `"yes"` (text after the **last** `Answer:`, stripped); a completion with no `Answer:` → `""` and a bad-call count of 1; `majority_vote` on a canned 21-sample list with 12× `"Richard Nixon"` → `("Richard Nixon", 12, 21)` (winner, `votes`, `n_valid`); on a 10/10/1 tie the winner is the answer whose first occurrence has the lowest sample index, identical across 100 repeated calls; **empty samples (D13):** 11× `""` + 10× `"Richard Nixon"` → `("Richard Nixon", 10, 10)` — `""` never wins — and `cotsc_to_react` on that row picks the **ReAct** prediction because `10 <= 10`; all 21 empty → `("", 0, 0)`, `em == 0`; **raw-string rule (D4):** `["Richard Nixon.", "richard nixon", "Richard Nixon."]` → the recorded `prediction` is `"Richard Nixon."`, the raw string of the winning key's **lowest** sample index; prompt-shape asserts: HotpotQA Standard prompt ends `"\nQuestion: <q>\nAnswer:"` **and carries no instruction header**, **HotpotQA CoT prompt likewise carries no instruction header and ends `"\nQuestion: <q>\nThought:"` (D1)**, FEVER CoT prompt ends `"\n\nClaim: <c>\nThought:"` |
+| **C6** | Standard, CoT, CoT-SC | `src/baselines.py` | `standard`, `cot`, `cot_sc`, `parse_answer`, `majority_vote` | `tests/test_baselines.py` | §3.2 Baselines (a)(b) + CoT-SC; specs **D2/D3/D4** | `parse_answer` replays all 6 HotpotQA and all 3 FEVER exemplar tails as fake completions and recovers the gold answer each time, **including** `"Answer:REFUTES"` → `"REFUTES"` (splitting on `"Answer: "` fails this); `parse_answer("Thought: ...\nAnswer: yes\nQuestion: next")` → `"yes\nQuestion: next"` (text after the **FIRST** `Answer:`, stripped — **D37**, which retracts D3's "last"; the earlier expectation `"yes"` assumed a first-line cut that no split-and-strip rule performs, and that the stop list makes unreachable); a completion with no `Answer:` → `""` and a bad-call count of 1; `majority_vote` on a canned 21-sample list with 12× `"Richard Nixon"` → `("Richard Nixon", 12, 0)` (winner, `winner_votes`, `empty_samples` — the as-built signature, see "Step 06 as built"); on a 10/10/1 tie the winner is the answer whose first occurrence has the lowest sample index, identical across 100 repeated calls; **empty samples (D13):** 11× `""` + 10× `"Richard Nixon"` → `("Richard Nixon", 10, 11)` — `""` never wins — and `cotsc_to_react` on that row picks the **ReAct** prediction because `10 <= 10`; all 21 empty → `("", 0, 21)`, `em == 0`; **raw-string rule (D4):** `["Richard Nixon.", "richard nixon", "Richard Nixon."]` → the recorded `prediction` is `"Richard Nixon."`, the raw string of the winning key's **lowest** sample index; prompt-shape asserts: HotpotQA Standard prompt ends `"\nQuestion: <q>\nAnswer:"` **and carries no instruction header**, **HotpotQA CoT prompt likewise carries no instruction header and ends `"\nQuestion: <q>\nThought:"` (D1)**, FEVER CoT prompt ends `"\n\nClaim: <c>\nThought:"` |
 | **C7** | The two combination rules | `src/combine.py` | `react_to_cotsc`, `cotsc_to_react`, `write_results_row` | `tests/test_combine.py` | §3.2 "Combining Internal and External Knowledge" A and B; spec **D6** | named fixture pair `tests/fixtures/combine_react.jsonl` / `tests/fixtures/combine_cotsc.jsonl`, 5 rows each, joined on `idx` — idx 0 (`hit_step_limit false`, `votes 15`), 1 (`true`, `15`), 2 (`false`, `10`), 3 (`true`, `10`), 4 (`false`, `11`), ReAct predictions `R0..R4`, CoT-SC predictions `S0..S4`. Expected picks, literally: `react_to_cotsc` → `[R0, S1, R2, S3, R4]` with `source` `[react, cotsc, react, cotsc, react]`; `cotsc_to_react` → `[S0, S1, R2, R3, S4]` with `source` `[cotsc, cotsc, react, react, cotsc]`. Each output line also inherits `n_steps` / `hit_step_limit` from the source it picked (D15). Neither function issues an LLM call (`calls.csv` row count unchanged), and `total_cost == 0.0` |
 | **C8** | Runner — **and the owner of the `WikiEnv` (D21)** | `src/run.py` | `main`, `run_one(idx, question, task, condition, env)` | `tests/test_run.py` | §3.1/§3.2 setup; eval indices from `hotpotqa.ipynb:126-132` | a 5-question run writes 5 JSONL lines to `runs/hotpotqa_react_{model}.jsonl` whose `idx` list equals `eval_indices(7405)[:5]`, each line carrying every field of the schema below; appends exactly **one** row to `results/results.csv` with the header below; a rerun is fully cache-served (cost delta 0.0) and byte-identical. **Env lifecycle (D21):** one `WikiEnv` is constructed for the whole run and passed to `build_graph(condition, env)`; `run_one` calls `env.reset()` **once per question**, and a spy on `reset` records exactly one call per question, in order. **Cross-question isolation (moved here from C1(e)):** a scripted two-question run where question 1 does `search[Colorado orogeny]` and question 2 opens with `lookup[New Mexico]` → question 2 gets `No more results.\n`, proving no page leaked. **Trajectory (D25):** one line per condition asserted non-empty and of the right shape — `standard`/`cot` a string starting `Question: ` (or `Claim: `), `cotsc` an object with `winner` / `samples` (21) / `votes`, `act`/`react` a scratchpad ending `Observation {n}: ...\n`, combination lines byte-equal to the source line named by `source`. **Rule 8 (CLAUDE.md:32-33) — both triggers:** every step-07 run is 500 questions × 2 tasks × 5 conditions, so it trips the ">100 questions" trigger regardless of cost and **requires an explicit ask before launch**, independent of the $5 estimate |
 | **C9** | Results table + claims | `src/report.py` → `README.md`, `results/results.csv` | `make_table` | `tests/test_results_table.py` | Table 1 / `paper/targets.csv`; claims from §3.3 and `07-full-runs.md:5` | given a 3-row `results.csv` fixture (`react` EM 0.31, `act` EM 0.22, `cot` EM 0.29), `make_table` emits a markdown table whose ReAct row reads `31.0` and whose claim line 1 (`ReAct > Act on both tasks`) reads `PASS`; flip the fixture to `act` EM 0.35 and the same line reads `FAIL`; and a guard test asserting every number in `README.md` also appears in `results/results.csv` (no hand-typed figures); per-type (bridge/comparison) breakdown present for CoT, Act, ReAct |
@@ -866,7 +866,10 @@ two are ours:
 **Per-question JSONL schema (C8).** CLAUDE.md rule 6 lists the **minimum**, not the maximum. Every line carries:
 
 `idx, question, gold, prediction, em, n_steps, hit_step_limit, trajectory` (rule 6) **plus**
-`condition, votes, n_valid, n_samples, n_calls, n_badcalls, cost_usd` — and `source` on combination lines only.
+`f1, condition, winner_votes, empty_samples, n_calls, n_badcalls, cost` — and `source` on combination lines only.
+**Field names are D39/D41's, as built** (`winner_votes` for the old `votes`, `empty_samples` for the old `n_valid`, `cost`
+for the old `cost_usd`, and `f1` is new; `n_samples` is a module constant, not a field). The bullets below still use the
+older spellings in places — the mapping is the "Step 06 as built" table at the end of "Our inventions".
 
 * **`trajectory` — defined per condition (D25).** Rule 6 requires a full trajectory on **every** line, and five of the seven
   conditions have no loop, so each needs its own definition. In every case it is the **live** part only; the instruction +
@@ -907,16 +910,17 @@ The reference implements **ReAct only**: `hotpotqa.ipynb:76` loads `webthink_sim
 Wikipedia observations (`:2829, :5162, :5712, :8116, :8292`), never code. So Act, Standard, CoT, CoT-SC, both combination
 rules and the parsers are ours. These specs are **decided**, not open questions.
 
-### Index of decisions D1–D28
+### Index of decisions D1–D28 and D37–D42
 
 Every decision is recorded **where the implementing step looks for it**; this table is the index, not a second home for the
-content. A row with a location outside this section has a stub heading below pointing at it, so `grep "^### D"` finds all 28.
+content. A row with a location outside this section has a stub heading below pointing at it, so `grep "^### D"` finds all
+of them. (D29–D36 were locked in earlier steps' decision files and are not re-hosted here; only D36 is cited, in §5.)
 
 | D | Decision | Where it actually lives |
 |---|---|---|
 | D1 | instruction-header scope (HotpotQA `react`/`act` only) | **§ "Our inventions" → D1** below; cross-referenced from the §5 table's "HotpotQA instruction header" row and asserted in C6 |
 | D2 | Standard prompt + parse | D2 below |
-| D3 | CoT prompt + parse (one call, split on the last literal `Answer:`) | D3 below |
+| D3 | CoT prompt + parse (one call) — **its parse bullet is retracted by D37**: FIRST occurrence, not last | D3 below, and D37 |
 | D4 | CoT-SC (21 requests, vote, tie-break, empty-sample rule) | D4 below (**D13 is folded into it**) |
 | D5 | Act loop (**including D17's first-line rule**) | D5 below |
 | D6 | the two combination rules | D6 below |
@@ -942,6 +946,12 @@ content. A row with a location outside this section has a stub heading below poi
 | D26 | CLAUDE.md rule 8 has **two** triggers, and the `$15` vs `$5` conflict | **the C8 / C11 / C12 rows of §6** and **"Disagreements with tests/EXPECTED.md" → Run gates**; stub below |
 | D27 | rule 4's "one model" is scoped to phases 1–2; phase 3's student runs under the same cache, cost log and decoding | **§5, "Scope of CLAUDE.md rule 4's one model"** + decoding-table row 7 + the naming table's phase-3 rows + C12; stub below |
 | D28 | the LLM cache key includes the system message | **the first row of the "Deliberate deviations we add" table**; asserted in C3; stub below |
+| D37 | the answer parse rule — first occurrence of the literal `Answer:` (**retracts D3's "last"**) | **D37 below**, with the measured exemplar table and one verbatim exemplar per key; asserted in C6 |
+| D38 | baseline prompt construction per task and condition | **D38 below** (D1–D3 restated with the measured whitespace); asserted in C6 |
+| D39 | CoT-SC: 21 requests at 0.7 under distinct `sample_index`, `winner_votes`, `empty_samples` | **D39 below**; asserted in C6 |
+| D40 | the two combination rules + `source` logging + the threshold note | **D40 below**; asserted in C7 |
+| D41 | log EM **and** F1 on every condition (its example is corrected in place) | **D41 below**; asserted in C8 |
+| D42 | the budget: `MAX_SPEND_USD` 5.00 → 20.00, measured from the step-05 live run | **D42 below**; the gate itself is `src/llm.py`, called from `src/run.py` |
 
 ### D1 — instruction-header scope
 
@@ -966,6 +976,10 @@ all four `fever.json` values already open with
   both. `temperature=0`, `max_tokens=100`. (Two calls would double CoT-SC cost for nothing.)
 * **Parse:** take the text after the **LAST** occurrence of the literal `Answer:` — **not** `"Answer: "` — then `.strip()`.
   `cotqa_simple3` and `webqa_simple3` both contain `Answer:REFUTES` with no space; a `"Answer: "` split drops it silently.
+  > **RETRACTED in part by D37** (2026-09-15): the literal `Answer:` is right, the **LAST** is not.
+  > D37 takes the **FIRST** occurrence. Kept here rather than overwritten so the change is visible:
+  > the two agree on every stop-cut completion and differ only when the stop list fails, where LAST
+  > returns the *next* question's answer. Everything else in this bullet stands.
 * Do **not** prepend `Let's think step by step. ` to the FEVER continuation: 0 occurrences in `cotqa_simple3` (§4).
 * If no `Answer:` appears in the completion, the prediction is `""` (scores 0) and the call counts as a bad call.
 
@@ -1191,10 +1205,227 @@ entry already sitting in `data/cache/llm/`) is `0.0`, so every ReAct and Act cal
 re-issued and re-billed while returning identical text. C3 asserts that the two spellings share one cache path and cost one
 request.
 
+### Decisions D37–D42 (step 06 — baselines, combination rules, runner)
+
+Locked before step 06, and reproduced here **with the measurements behind them** so that
+`grep "^### D"` finds them and steps 07/08 never have to reopen the decision file they were locked
+in. All six are implemented as written; the single disagreement is an evidence error inside D41's
+example (recorded under D41 and in CLAUDE.md's corrections log), not a change to any rule.
+
+#### The measured exemplar table — the basis for D37 and D38
+
+Counts are `str.count` over the four baseline keys, not recollection:
+
+| key | file | exemplars | terminator | `Answer: ` **with** a space | answers ending `.` | own header | blank-line separated | chars |
+|---|---|---|---|---|---|---|---|---|
+| `webqa_simple6` | `prompts_naive.json` | 6 | `Answer: X` | 6/6 | 0/6 | no | no | 738 |
+| `cotqa_simple6` | `prompts_naive.json` | 6 | `Answer: X` | 6/6 | 0/6 | no | no | 1,945 |
+| `webqa_simple3` | `fever.json` | 3 | `Answer: X` | **2/3** | 0/3 | yes | yes | 363 |
+| `cotqa_simple3` | `fever.json` | 3 | `Answer: X` | **2/3** | 0/3 | yes | yes | 725 |
+
+The 2/3 rows are the whole reason D37 exists: **the third FEVER exemplar in both baseline keys
+reads `Answer:REFUTES`, with no space.** `tests/test_baselines.py::test_both_spellings_are_really_in_the_exemplars`
+re-measures both cells (`"Answer:REFUTES" in value` and `value.count("Answer: ") == 2`) so the
+table cannot drift away from the files.
+
+One exemplar quoted **verbatim** per key — the second item of each file, which is the same
+question/claim in all four, and on FEVER is the `REFUTES` one, i.e. D37's evidence:
+
+`prompts_naive.json["webqa_simple6"]`, exemplar 2 of 6 (ends with one `\n`, no blank line):
+
+```text
+Question: Musician and satirist Allie Goertz wrote a song about the "The Simpsons" character Milhouse, who Matt Groening named after who?
+Answer: Richard Nixon
+```
+
+`prompts_naive.json["cotqa_simple6"]`, exemplar 2 of 6 — note `Thought: Let's think step by step. `
+(HotpotQA only, 6/6) and the closing `so the answer is X.`:
+
+```text
+Question: Musician and satirist Allie Goertz wrote a song about the "The Simpsons" character Milhouse, who Matt Groening named after who?
+Thought: Let's think step by step. Milhouse was named after U.S. president Richard Nixon, so the answer is Richard Nixon.
+Answer: Richard Nixon
+```
+
+`fever.json["webqa_simple3"]`, exemplar 2 of 3 — **`Answer:REFUTES`, no space**, and the block ends
+with `\n\n` (the blank-line separation D38 restores for the live claim):
+
+```text
+Claim: Stranger Things is set in Bloomington, Indiana.
+Answer:REFUTES
+
+```
+
+`fever.json["cotqa_simple3"]`, exemplar 2 of 3 — same no-space `Answer:`, and the thought carries
+**no** `Let's think step by step. ` prefix (0/3 on FEVER; do not add it):
+
+```text
+Claim: Stranger Things is set in Bloomington, Indiana.
+Thought: Stranger Things is in the fictional town of Hawkins, Indiana, not in Bloomington, Indiana.
+Answer:REFUTES
+
+```
+
+### D37 — the answer parse rule (**retracts the parse bullet of D3**)
+
+`src/baselines.py::parse_answer`, one line:
+
+```python
+_, sep, tail = text.partition("Answer:")   # partition == FIRST occurrence
+return tail.strip() if sep else ""
+```
+
+Split the (already stop-cut) completion on the literal `"Answer:"` — **not** `"Answer: "` — take
+what follows the **FIRST** occurrence, and `.strip()` it.
+
+* **`"Answer:"`, not `"Answer: "`.** `Answer:REFUTES` appears in *both* FEVER baseline keys (table
+  above), so a parser splitting on the spaced form drops that answer shape silently — it returns
+  `""`, which scores 0 and is indistinguishable in `runs/` from a model that never answered.
+* **FIRST, not LAST. This CORRECTS D3**, whose parse bullet says "the text after the **LAST**
+  occurrence". D3 is retracted **by name** on that point only; the rest of D3 (prompt, one call,
+  greedy, no `Let's think step by step. ` on FEVER, empty prediction = bad call) stands. After the
+  stop cut the two rules agree, because a well-formed completion contains exactly one `Answer:`;
+  they differ exactly when the stop list fails and the completion runs on into
+  `Question: <next>\nThought: ...\nAnswer: <other>`, where LAST returns **a different question's
+  answer** and FIRST returns this one's. FIRST is therefore identical when cutting worked and
+  strictly safer when it did not.
+* **No trailing-period strip.** No exemplar answer ends in `.` (0/6, 0/3 above), `normalize_answer`
+  removes punctuation for scoring anyway, and CLAUDE.md rule 6's `prediction` must stay raw.
+* A completion with no `Answer:` at all yields `""`: EM 0, and one bad call (D3).
+* Not part of the rule: any cut at the first newline. `parse_answer` returns everything after the
+  first `Answer:`, trailing junk included. The §6 C6 row used to give
+  `parse_answer("Thought: ...\nAnswer: yes\nQuestion: next") == "yes"`, which no split-and-strip
+  rule produces — corrected there, and noted here because it is the one place the two spellings of
+  the rule looked different.
+* **Standard does not use `parse_answer` at all** (D2): its prompt already ends in `Answer:`, so
+  the completion *is* the answer and is only stripped. Feeding it to `parse_answer` would return
+  `""` for every well-formed Standard completion.
+
+### D38 — baseline prompt construction (D1–D3 restated with the measured whitespace)
+
+| condition | prompt | stop |
+|---|---|---|
+| HotpotQA `standard` | `webqa_simple6 + f"Question: {q}\nAnswer:"` | `["\n"]` |
+| HotpotQA `cot` / `cotsc` | `cotqa_simple6 + f"Question: {q}\nThought:"` | `["\nQuestion:"]` |
+| FEVER `standard` | `webqa_simple3 + f"\nClaim: {c}\nAnswer:"` | `["\n"]` |
+| FEVER `cot` / `cotsc` | `cotqa_simple3 + f"\nClaim: {c}\nThought:"` | `["\nClaim:"]` |
+
+The extra leading `\n` on FEVER reproduces its blank-line exemplar separation (each `*_simple3`
+value ends with a single `\n` while its exemplars are `\n\n`-separated); HotpotQA must **not** get
+one. **No instruction header is prepended for any baseline on either task (D1)** — the FEVER keys
+carry theirs inline as their own first line. `temperature=0.0`, `max_tokens=100`, one call.
+
+### D39 — CoT-SC (D4/D13 restated, plus the diagnostic this step adds)
+
+Same prompt as D38's `cot` row. **n = 21 independent requests at temperature 0.7**, one
+`llm.complete(..., n=21)` call, which is 21 requests under `sample_index` 0–20 (§5's `n` column).
+Twenty-one separate `n=1` calls would be the same code path with every sample keyed on
+`sample_index=0`: one request, one cache entry, and one answer voting twenty-one times —
+`tests/test_baselines.py::test_cot_sc_issues_21_requests_under_21_distinct_sample_indices` asserts
+the distinctness against the cache keys, not against the return value.
+
+* Vote over `normalize_answer`; the recorded prediction is the winner's **raw** string.
+* **Empty (parse-failed) samples do not vote, and the denominator stays 21** (D13), so the D40
+  threshold is 10.5 whatever the parse rate. `empty_samples` is recorded per question precisely so
+  that a low winner count can be read correctly: many empty samples means the *parser* (or the
+  model's format compliance) failed, not that the model was internally uncertain, and the README
+  must be able to tell those two apart.
+* `winner_votes` is the **winner's** count, never the sample total.
+* Deterministic tie-break: among tied normalized answers, the one whose **first** occurrence has
+  the lowest sample index; its raw string is the prediction. One scan of the samples settles this
+  and the several-raw-spellings case together.
+
+### D40 — the combination rules, plus `source` logging
+
+* `react_to_cotsc`: the ReAct prediction **unless `hit_step_limit`**, then CoT-SC's. It keys off
+  the step limit, never off `em` — the paper backs off when ReAct "fails to return an answer within
+  given steps", not when it answers wrongly, and an `em`-keyed rule would also be an oracle.
+* `cotsc_to_react`: the CoT-SC prediction **unless `winner_votes < 21/2 = 10.5`** (i.e. `<= 10`),
+  then ReAct's.
+* Both are pure post-processing over two `runs/` JSONL files joined on `idx`; `src/combine.py`
+  issues **no** LLM call and imports nothing that can.
+* Every output line records `source ∈ {"react", "cotsc"}`, so the fallback fraction is readable
+  from `runs/` alone. This is not bookkeeping: if ReAct's step-limit rate is high,
+  `react_to_cotsc` collapses onto CoT-SC and stops being a combination at all, and that has to be
+  visible in the README rather than inferred.
+* Note on the threshold, for whoever reviews the mutation table: `votes < 10.5`, `votes <= 10.5`
+  and `votes <= 21 // 2` are the **same predicate** for integer vote counts at odd n, so no test
+  can separate them; `votes < 21 // 2` is a different one and is killed by the 10-vote fixture
+  row. The boundary is therefore pinned exhaustively (fallback set == {0..10}) and from both sides
+  (10 → ReAct, 11 → CoT-SC).
+
+### D41 — log EM **and** F1 on every condition
+
+EM is the Table 1 headline; F1 is the diagnostic that separates a wrong answer from a right answer
+EM rejected. Every condition logs both, including the two combination conditions (which inherit
+them from the line they picked).
+
+> **Evidence correction.** D41 cites live question 5388 — prediction `torpedo boats and submarines`
+> against gold `torpedoes` — as "EM 0, F1 > 0". Measured, that pair scores **EM 0 and F1 0.0**:
+> SQuAD normalization lowercases and strips punctuation but does **not** stem, so `torpedo` and
+> `torpedoes` are different tokens and the overlap is empty. The decision stands; the example does
+> not. A pair on the same question that does show the gap is `torpedoes and submarines` → **EM 0,
+> F1 0.5**, and that is what `tests/test_run.py` pins (both pairs, so the corrected claim cannot
+> quietly revert). Logged as corrections-log entry 11.
+
+### D42 — the budget, and what it is measured from
+
+`MAX_SPEND_USD` was raised **5.00 → 20.00** in `.env`. **The original gate was $5.00** (CLAUDE.md
+rule 8), and rule 8's ask-before-spending requirement is **unchanged** — only the ceiling moved.
+Measured basis, from the 16 real calls of the step-05 live run:
+
+| quantity | measured |
+|---|---|
+| calls per question (ReAct, HotpotQA) | 5.33 |
+| mean prompt tokens | 1,980 (min 1,611, max 2,374) |
+| cost per call | $0.000333 |
+| ReAct on 500 HotpotQA questions | ≈ $0.89 |
+| all five conditions on both tasks | ≈ $6.40 |
+
+So **the $5.00 ceiling would have been hit partway through phase 1** — with the cheap conditions
+already paid for and the expensive one half-finished, which is the worst place to stop. That, not
+a change of policy, is why the number moved.
+
+Two consequences that are code, not prose:
+
+* `src/run.py` calls `llm.check_budget_for_batch` **before the first call of every run** and exits
+  on a refusal, and it refuses to start a run of more than 100 questions without `--yes-over-100`
+  — rule 8's *other* trigger (D26), which no cost estimate can satisfy.
+* The runner's pre-flight deliberately sizes ReAct/Act **above** the measured 5.33 calls (it
+  assumes 8: seven steps plus a parse-failure retry) and at the step-05 *maximum* prompt length
+  (~9,500 chars ≈ 2,374 tokens), because `llm._estimate` wants the last step's prompt, not the
+  mean. A gate that rounds down is not a gate.
+* Raising the ceiling in `.env` broke `tests/test_llm.py`, which asserted the reloaded module's
+  `MAX_SPEND_USD == 5.00`; the assertion now pins the *invariant* (finite and non-negative) rather
+  than the operator's number. Corrections-log entry 12.
+
+### Step 06 as built — signatures and JSONL field names
+
+The names the code uses, because C6/C7/C8 above were written before D39/D41 fixed them:
+
+| where | as built | earlier name in §6 |
+|---|---|---|
+| `baselines.majority_vote(preds)` | `-> (winner_raw, votes, empty_samples)` | `(winner, votes, n_valid)` |
+| JSONL, CoT-SC winner count | `winner_votes` | `votes` |
+| JSONL, unparsed sample count | `empty_samples` (`n_valid == 21 - empty_samples`) | `n_valid` |
+| JSONL, per-question spend | `cost` | `cost_usd` |
+| JSONL, new in D41 | `f1` on every line | — |
+| `baselines`/`run` result rows | `winner_votes` / `empty_samples` are `null` outside `cotsc` | unchanged |
+
+`n_samples` is not a JSONL field: it is the constant 21 in both `src/baselines.py` and
+`src/combine.py` (pinned equal by a test), because the D40 threshold is the paper's n and must not
+become a per-line value that a future writer can get wrong. `results/results.csv` keeps its
+verbatim eight-column header — F1 lives in `runs/`, per question, where the diagnostic is useful.
+
 ### Disagreements with the locked decisions
 
-None. D1–D28 are implemented as written, and every one of the twenty-eight is findable from the index at the head of this
-section.
+One, and it is an **evidence** error rather than a rule change: D41's cited EM/F1 example does not
+score what D41 says it scores (see the correction box under D41, and corrections-log entry 11). The
+decision itself — log EM and F1 on every condition — is implemented as written.
+
+Otherwise none. D1–D28 and D37–D42 are implemented as written, and every one of them is findable
+from the index at the head of this section. D29–D36 were settled in earlier steps' locked-decision
+files; the only one this document cites is D36 (§5, the `n` column).
 
 ---
 

@@ -475,6 +475,7 @@ def test_the_shipped_defaults_are_the_ones_rule_8_relies_on(monkeypatch):
         importlib.reload(llm)
 
 
+@pytest.mark.builds_client
 def test_the_real_client_carries_the_reference_decoding_params(monkeypatch):
     # OFFLINE: constructs the client and inspects the payload it WOULD send. Nothing
     # is transmitted, so the dummy key is never used.
@@ -536,4 +537,7 @@ def test_a_non_finite_ceiling_is_refused_at_import(monkeypatch, bad):
         importlib.reload(llm)
     monkeypatch.delenv("MAX_SPEND_USD")
     importlib.reload(llm)                      # leave the module healthy
-    assert llm.MAX_SPEND_USD == 5.00
+    # The reload re-reads .env, so this pins the INVARIANT (a finite, non-negative
+    # ceiling), not the operator's number: D42 moved that number 5.00 -> 20.00 and the
+    # hard-coded 5.00 that used to stand here failed the moment it did.
+    assert 0 <= llm.MAX_SPEND_USD < float("inf")
