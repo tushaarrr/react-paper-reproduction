@@ -9,6 +9,7 @@ D18 (disk cache + retries + User-Agent), and no think[] action.
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -90,10 +91,12 @@ class WikiEnv:
         else:
             raise timeout  # never None, unlike hotpotqa.ipynb:46-52
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps({"url": url, "fetched_at": time.time(), "html": html}),
             encoding="utf-8",
         )
+        os.replace(tmp, path)  # atomic: an interrupt leaves no truncated entry
         return html
 
     # -- actions -----------------------------------------------------------

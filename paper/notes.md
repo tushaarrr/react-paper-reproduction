@@ -616,10 +616,19 @@ phase-1/2 rows** (`.env` `MODEL`); the seventh row is phase 3's deliberate secon
 The phase-3 row is reached through the **same `complete()` in `src/llm.py`** — `--model` points at a merged adapter served by
 vLLM (or Ollama) and the call goes through the same disk cache and the same `results/calls.csv` append, so CLAUDE.md rules 4
 and 5 hold for the student exactly as for `gpt-4o-mini`. Its price-table entry is `0.0 / 0.0` by design (self-hosted
-inference has no per-token price), which is **not** the unknown-model fallback below.
+inference has no per-token price) and is an **explicit** table row, not a fallback: an unpriced model is
+refused, not costed at zero (see the price table below).
 
 `top_p = 1`, `frequency_penalty = 0.0`, `presence_penalty = 0.0` everywhere (`hotpotqa.ipynb:27-29`). CoT-SC's `temperature`
 is the **only** cell that differs across conditions; every `max_tokens` is 100.
+
+**The `n` column is n independent requests, never the provider's native `n=21` (D4, confirmed D36).** One request asking for
+21 completions would be cheaper — it bills the ~6 KB prompt once instead of 21 times — and it was considered. It is still
+wrong here, for three reasons that outrank the saving: the cache key's `sample_index` (D28) and `calls.csv`'s `sample_index`
+column both assume **one row and one cache entry per sample**, so a single 21-sample row makes both meaningless and breaks
+C3's "21 `calls.csv` rows on a cold cache"; a CoT-SC question interrupted part-way could not resume free, because a native-`n`
+response caches as one indivisible blob; and D4's effect estimate already budgets ≈21× CoT, so the extra prompt tokens are
+the cost that was planned for, not an overrun. Settled — not to be re-derived at the next cost review.
 
 ### Model and price table (D16) — what makes CLAUDE.md rule 8 computable
 
@@ -636,12 +645,52 @@ from a small price table in the file"). Rates as of **2026-09-15**, USD per 1M t
 
 * `prompt_tokens` / `completion_tokens` come from the **provider response's `usage` field**, never from a local tokenizer
   estimate — a mis-estimate would silently mis-gate rule 8.
-* A model missing from the table costs `0.0` and logs a warning rather than crashing a run mid-flight.
+* A model **missing from the table is refused**: `_check_budget` raises `BudgetExceeded` before the request, naming the
+  model. Costing an unpriced model `0.0` — what this bullet used to specify — zeroes the pre-call estimate, every logged
+  `cost_usd` and therefore `_spend_so_far()`, so CLAUDE.md rule 8's ceiling can never fire: one typo in `.env`'s `MODEL`
+  buys a 25x-priced model (14,000 calls ≈ $66.50 on `gpt-4o` against $3.99 on `gpt-4o-mini`) while the ledger reads $0.00.
+  A guard that cannot price a call must not authorise it. **Free is explicit, not the default** — see the next bullet.
 * **These rates are a local constant and can go stale.** Re-check them against the provider's pricing page before any cost
   total is quoted in `README.md`.
 * The local-backend entry is `0.0 / 0.0` **deliberately**, so a phase-3 run still writes `calls.csv` rows and a
-  `results.csv` `total_cost` of `0.0` rather than tripping the unknown-model warning.
+  `results.csv` `total_cost` of `0.0`. Because absence is now a refusal, each locally served model needs its **own explicit
+  row** in `PRICES`: `qwen2.5-3b-prompted`, `qwen2.5-3b-react-lora` and `qwen2.5-3b-react-lora-q4` (the three `{model}`
+  slots of section 6's naming table) all ship at `0.0 / 0.0`. Serving a fourth name means adding a fourth row — one line,
+  and the refusal message says so. A `0.0 / 0.0` model still logs one warning per call, which is the only remaining
+  warn-and-charge-zero path.
 * C3 pins the arithmetic: a call with known `usage` counts produces a known `cost_usd`.
+* **The model string is pinned in `.env` (`MODEL`) and must be written into every `results/` row** — the `model` column of
+  `results/calls.csv` (one row per real call, rule 6) and the `model` column of `results/results.csv` (one row per
+  `(task, condition, model, n)`, rule 6), and it is also the first field of the LLM cache key (D28). `src/llm.py` reads it
+  once at import (`MODEL = os.getenv("MODEL", "gpt-4o-mini")`) and `complete()` takes no model argument, so a mid-project
+  model change can never silently blend into one table: the new model's rows carry the new string, and its calls **miss** the
+  cache rather than being served from the old model's completions. A `results.csv` row without a `model` column is not a
+  result.
+* **Budget guard (CLAUDE.md rule 8), in code.** `MAX_SPEND_USD` is read from `.env` (default `5.00`, recorded in
+  `.env.example`). Cumulative spend is read back from `results/calls.csv` itself — the log **is** the ledger, so the total
+  survives a process restart and a resumed run, which a per-process counter does not. `src/llm.py` raises `BudgetExceeded`
+  **before** issuing the call that would cross the ceiling, naming spend so far, the ceiling and the attempted call. Cache
+  hits issue no request, write no row, and therefore cost nothing. The pre-call estimate — the one number that cannot come
+  from `usage`, because the call has not happened — is `len(system + prompt) / 4` characters-per-token on the input side and
+  the full `max_tokens` on the output side (its hard ceiling, so the estimate never runs low on the half we control). It
+  gates only; it is never logged.
+
+### Temperature 0 is not determinism — the cache is (README Limitations)
+
+`temperature=0` on a modern chat API is **not** a guarantee of identical output: the provider may re-route a request to a
+different serving stack or fleet revision, batching is nondeterministic on GPU, and the model itself can be updated behind a
+floating alias. The reference's `text-davinci-002` had the same property; the paper does not claim determinism either, only
+"greedy decoding" (§3.3 fn 4).
+
+**Our reproducibility across reruns therefore comes from the disk cache, not from the provider.** Every rerun of a populated
+cache replays the same bytes for the same `(model, system_message, prompt, stop, temperature, max_tokens, sample_index)` key
+(D28) and so reproduces EM exactly; a rerun that *misses* the cache — a new model string, an edited system message, a deleted
+`data/cache/llm/` — is a fresh sample and may differ, at temperature 0 as well as at 0.7. Two consequences to state rather
+than discover:
+
+* A number in `README.md` is reproducible **given `data/cache/llm/`**, which CLAUDE.md rule 9 keeps out of git. Anyone
+  re-running from a clean clone re-samples the model and can land on a different EM.
+* This belongs in the README's Limitations section (`12-evaluate-serve.md:14`), next to D20's fine-tuning caveats.
 
 **Scope of CLAUDE.md rule 4's "one model for all conditions" (D27).** It binds **phases 1–2**: the seven Table-1 conditions
 all run on `gpt-4o-mini`, which is what makes the seven-condition comparison fair. **Phase 3 deliberately introduces a second
@@ -733,10 +782,21 @@ them, so the fine-tuned, prompted-3B and quantized evaluations each write per-qu
 **`results/results.csv` header**, verbatim (`06-baselines-combine.md:7`):
 `task,condition,model,n,metric,mean_steps,pct_hit_step_limit,total_cost`
 
-**`results/calls.csv` header** — **our column names** for the fields `04-llm-client.md:5` lists in prose ("timestamp, model,
-prompt_tokens, completion_tokens, estimated cost from a small price table in the file"); the first four match its words, and
-**`cost_usd` is our name for "estimated cost"** — the token `cost_usd` does not appear in that file:
-`timestamp,model,prompt_tokens,completion_tokens,cost_usd`
+**`results/calls.csv` header** — **seven** columns, verbatim as written by `src/llm.py` (`CALLS_HEADER`, pinned by a test in
+`tests/test_llm.py` against this line). Five are **our column names** for the fields `04-llm-client.md:5` lists in prose
+("timestamp, model, prompt_tokens, completion_tokens, estimated cost from a small price table in the file") — the first four
+match its words, and **`cost_usd` is our name for "estimated cost"**, a token that does not appear in that file. The other
+two are ours:
+`timestamp,model,sample_index,prompt_tokens,completion_tokens,cost_usd,cache_hit`
+
+* `sample_index` — `0` outside CoT-SC, `0`–`20` within it. It is what makes one row one **sample** rather than one question
+  (D4, D28); without it C3's "21 rows on a cold cache" cannot be checked against the ledger at all. This file is the only
+  place the column appears as a CSV column; elsewhere it is described as a cache-key field.
+* `cache_hit` — **constant `False` today, by construction**: a cache hit issues no request and writes no row (C3), so every
+  row in the file is a real call. It is declared anyway so that a later decision to log hits adds rows rather than changing
+  the header under readers. Two things bind any such change: `_spend_so_far()` sums `cost_usd` over **every** row, so a hit
+  row must carry `cost_usd == 0.0` or it double-charges rule 8's ledger, and a hit rate must then be computed from
+  `cache_hit`, never from the row count.
 (The `results/results.csv` header above **is** verbatim: `06-baselines-combine.md:7` literally lists
 `(task, condition, model, n, metric, mean_steps, pct_hit_step_limit, total_cost)`.)
 
@@ -1124,8 +1184,9 @@ Each row states the change and a **one-line estimate of its likely effect on res
 | **`timeout=30` on the `_fetch` GET (D18)** | the reference passes no `timeout=` (`wikienv.py:99-102`), so its `except requests.exceptions.Timeout` in the driver (`hotpotqa.ipynb:46-52`) can never fire — a hung socket blocks forever. A retry policy needs a timeout to retry *from*, so we set one | None on EM. Bounds a hung request at 30s instead of indefinitely; a slow-but-alive Wikipedia response under 30s is unaffected. Too small a value would convert healthy responses into 10 wasted retries, so the magnitude is asserted in C1, not just its presence |
 | `hit_step_limit` flag, per-question JSONL, `results/calls.csv` | CLAUDE.md rules 5 and 6 | None on EM; `hit_step_limit` is the input to D6's `react_to_cotsc` |
 | **Chat-vs-completion adaptation** | the reference calls a raw completion endpoint with a single prompt string (`hotpotqa.ipynb:22-32`); we send the identical completion-style prompt as **one user message** to a chat model (`04-llm-client.md:1`) | Chat models are RLHF-tuned to answer rather than continue text; expect more preamble and more parse failures than davinci-002, i.e. higher `n_badcalls` and a small EM drag unless the system message below compensates |
-| **System message** | short, fixed, identical across all conditions and both tasks — **our wording** for the requirement at `04-llm-client.md:1` (which states it in prose and contains no such literal; `grep -rn "Continue the text exactly in the format" prompts/claude-code/` → 0 hits): *"Continue the text exactly in the format of the examples. Do not write an Observation line; stop before it."* It is part of the cache key (row 1) | Suppresses conversational answers and raises parse success; may **inflate** EM relative to a raw completion model, since it supplies format guidance the reference's prompt did not. Because it is constant across conditions it should not reorder them |
+| **System message** | short, fixed, identical across all conditions and both tasks — **our wording** for the requirement at `04-llm-client.md:1` (which states it in prose and contains no such literal; `grep -rn "Continue the text exactly in the format" prompts/claude-code/` → 0 hits): *"Continue the text exactly in the format of the examples. Do not write an Observation line; stop before it."* It is part of the cache key (row 1), lives as `SYSTEM_MESSAGE` in `src/llm.py`, and C3 asserts both that the literal in this row is the literal in the module and that changing it misses the cache | Suppresses conversational answers and raises parse success; may **inflate** EM relative to a raw completion model, since it supplies format guidance the reference's prompt did not. Because it is constant across conditions it should not reorder them |
 | **Client-side stop cutting** | after the provider's own stop handling, cut the returned text at the **first** occurrence of any stop string and **exclude** the stop string itself (`04-llm-client.md:3`) | Matches OpenAI completion semantics exactly when the provider honours stop; when it does not, it prevents the model writing its own `Observation`, which would otherwise poison the scratchpad and inflate EM by letting the model hallucinate evidence |
+| **Temperature 0 is not determinism; the cache is** | `temperature=0` is greedy, not a provider guarantee: serving-stack routing, GPU batching and a floating model alias can all change the bytes. Reruns are reproducible because the disk cache replays them, not because the provider repeats itself. Stated in full in §5, "Temperature 0 is not determinism", and **marked for the README's Limitations section** (`12-evaluate-serve.md:14`) | None on a cached rerun, by construction: EM is bit-identical. On a **cold** cache — a clean clone, a new model string, an edited system message — every condition may move, so a README number is reproducible only together with `data/cache/llm/`, which rule 9 keeps out of git. The honest claim is "reproducible from this cache", not "deterministic" |
 | `think[...]` omitted | our env implements only `search`/`lookup`/`finish`/invalid | None: `think[` appears in 0 of the 12 prompt keys, so the model is never primed to emit it; if it ever does, it lands on the invalid-action branch and the episode continues |
 | Disambiguation recursion capped at depth 1 (D8) | `wikienv.py:112-113` is unbounded | None observed: every verified disambiguation resolves in one retry. Prevents a pathological page from hanging a 500-question run |
 | Zero-result search pages treated as a miss with an **empty** Similar list (D10) | the reference falls through to the article branch and returns `There were no results matching the query..` plus sidebar chrome | None on real questions; affects only pathological searches, where it replaces nav chrome with a clean miss the model can act on |

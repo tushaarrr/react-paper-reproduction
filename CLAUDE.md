@@ -60,6 +60,21 @@ Defects found in this project's OWN files and fixed at source. Newest last.
 5. `.gitignore` / `setup.sh` — `.gitignore` excluded only `data/sft/` while rule 9 forbids
    committing `data/` at all. Widened, and `setup.sh` now restores `data/` and `prompts/`
    from the reference clone (both are byte-identical to it) so a clean clone still works.
+6. `paper/notes.md` — its `results/calls.csv` header block declared five columns while
+   `src/llm.py` writes the seven the step-04 brief specifies, and `sample_index` was
+   described there only as a cache-key field. Downstream readers (step 07's cost gate,
+   `results.csv` aggregation) are written against notes.md, so the two had to agree.
+   Corrected to the seven columns, with a reason for each of the two extras — including
+   the honest note that `cache_hit` is constant `False` by construction and exists so a
+   later decision to log hits does not move the header. `tests/test_llm.py` now pins
+   `CALLS_HEADER` against that literal, as it already did for the system message.
+7. `paper/notes.md` — its price-table bullet specified that a model missing from `PRICES`
+   "costs 0.0 and logs a warning". That silently disables rule 8: the pre-call estimate,
+   every logged `cost_usd` and therefore the whole ledger go to zero together, so the $5
+   ceiling can never fire — one typo in `.env`'s `MODEL` buys a 25x-priced model
+   (~$66.50 for 14,000 calls) against a ledger reading $0.00. Corrected to a refusal
+   before the first call; the deliberately-free phase-3 models get explicit `0.0 / 0.0`
+   rows instead, so free is stated rather than assumed.
 
 ### Rule 10
 
