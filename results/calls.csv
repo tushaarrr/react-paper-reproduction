@@ -1,0 +1,2 @@
+timestamp,model,sample_index,prompt_tokens,completion_tokens,cost_usd,cache_hit
+2026-09-15T01:32:25,gpt-4o-mini,0,1615,41,0.00026685,False

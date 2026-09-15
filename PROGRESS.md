@@ -14,7 +14,9 @@ Commit after every step. Tag `v1-reproduced` after step 08 comes back clean.
        L45 misquotes paper 3.3, L46 is a paraphrase. See notes.md.)
 - [ ] 02 environment      -> tests/test_wiki_env.py passes
 - [ ] 03 data + metrics   -> eval indices and EM tests pass
-- [ ] 04 llm client       -> cache test passes, results/calls.csv appears
+- [x] 04 llm client       -> cache test passes, results/calls.csv appears
+      (79 tests; 45 mutations killed + 3 adversarial budget holes closed;
+       one live call: 1615+41 tok, $0.00026685)
 - [ ] 05 react graph      -> fake-LLM tests pass, 3 real trajectories look sane
 - [ ] 06 baselines        -> 100-question table printed next to targets.csv
 - [ ] 07 full runs        -> README.md has the results table and 4 claims marked
