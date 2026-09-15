@@ -1752,3 +1752,54 @@ is worth knowing and is NOT the independent-method comparison claims 1-3 make. A
 share no machinery (`react_to_cotsc` vs `cot`, vs `standard`) the comparison is clean. The claims
 table reports the split, never four uniform p-values.
 
+## Hypotheses about WHY, and their provenance
+
+Provenance is tracked strictly here. A prediction written after the evidence is not a prediction,
+and labelling it as one would be worse than not writing it at all.
+
+### H1 — knowledge-limited (NOT pre-registered; reconstructed 2026-09-15 AFTER the cot result)
+
+**Status: this was never recorded in the repo before the evidence arrived.** It was raised in
+conversation as something that had been pre-registered; no such entry exists in notes.md, in any
+other file, or in the run logs. It is written down here as a reconstruction, dated, precisely so
+that the absence of an earlier record is visible rather than papered over.
+
+The hypothesis: the binding constraint on HotpotQA is missing knowledge, not reasoning, so giving
+the model tools (ReAct/Act) should help MORE here than it did in the paper, i.e. the tool gap
+should exceed the paper's.
+
+**First evidence runs against it.** `cot - standard = +6.0` points (35.2 vs 29.2) where the paper
+reports +0.7 (29.4 vs 28.7). CoT supplies no tools and no new facts — only a reasoning scaffold. A
+knowledge-limited model would not gain 6 points from a scaffold alone.
+
+### H2 — reasoning-scaffold limited (revised reading of the same evidence)
+
+Standard scores 29.2 against the paper's 28.7, so the FACTS are largely present: a bare-answer
+prompt on a 2026 small model matches a 2022 540B model. What the scaffold buys is room to use them.
+So the constraint is the absence of a place to reason, not the absence of knowledge.
+
+### P1 — GENUINELY PRE-REGISTERED, 2026-09-15, before act/react/cotsc landed
+
+Written while `act` stood at 57/500 and `react` at 20/500 (the 20 being the earlier development
+run), with neither condition's n=500 EM known to anyone.
+
+**If H2 holds, tools should add LESS here than in the paper, not more.** A model that already has
+the facts and is merely short of room to reason gains little from an external retriever.
+Concretely, on HotpotQA:
+
+| quantity | paper | P1 predicts |
+|---|---|---|
+| ReAct - CoT | -2.0 | **at or below -2.0** (ReAct further behind CoT than in the paper) |
+| ReAct - Act | +1.7 | no directional prediction; H2 says nothing about thoughts-vs-no-thoughts |
+
+P1 is falsifiable and will be scored in the claims table against the pre-registered CI rule above,
+whichever way it falls. If ReAct - CoT comes out ABOVE -2.0, P1 is wrong and gets marked wrong here.
+
+### Candidate headline, pending act/react
+
+`cot - standard` is +6.0 here against +0.7 in the paper: a reasoning scaffold does roughly eight
+times as much for a small 2026 model as it did for a 540B 2022 model. It is above our ~5-point
+resolution (p = 7.6e-04, CI [+2.62, +9.38]), so unlike most of Table 1 it is a result this
+experiment can actually resolve. If it survives act/react, the README should open with it rather
+than with the Table 1 ordering -- the ordering is mostly inconclusive at this power, and this is not.
+
