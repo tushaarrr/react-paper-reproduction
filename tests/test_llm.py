@@ -317,9 +317,9 @@ def test_the_budget_is_rechecked_before_every_sample(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "prompt, max_tokens, max_spend",
     [
-        ("p", 100, 5e-5),         # output half alone: 100/1e6*0.60      = 6.0e-5
-        ("p" * 100_000, 0, 3e-3),  # input half alone: 25,000/1e6*0.15    = 3.75e-3
-        ("", 0, 3.9e-6),          # system message alone: 26.5/1e6*0.15  = 3.975e-6
+        pytest.param("p", 100, 5e-5, id="output-half"),  # 100/1e6*0.60     = 6.0e-5
+        pytest.param("p" * 100_000, 0, 3e-3, id="input-half"),  # 25e3/1e6*.15 = 3.75e-3
+        pytest.param("", 0, 3.9e-6, id="system-message"),  # 26.5/1e6*0.15 = 3.975e-6
     ],
 )
 def test_every_term_of_the_pre_call_estimate_is_counted(
