@@ -1,6 +1,6 @@
 task,condition,model,n,metric,mean_steps,pct_hit_step_limit,total_cost
-hotpotqa,act,gpt-4o-mini,20,0.5,4.2,10.0,0.016564
-hotpotqa,react,gpt-4o-mini,20,0.55,4.45,25.0,0.022835
 hotpotqa,cotsc,gpt-4o-mini,20,0.55,,,0.045712
 hotpotqa,standard,gpt-4o-mini,500,0.292,,,0.018066
 hotpotqa,cot,gpt-4o-mini,500,0.352,,,0.054636
+hotpotqa,act,gpt-4o-mini,500,0.356,4.626,18.0,0.45969
+hotpotqa,react,gpt-4o-mini,500,0.352,4.66,28.2,0.744701
